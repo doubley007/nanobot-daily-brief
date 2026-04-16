@@ -1,0 +1,23 @@
+# Environment & secrets
+.env
+.env.*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+logs/
+
+# macOS
+.DS_Store
+
+# Nanobot upstream repo (submodule, not our code)
+nanobot/
+
+# IDE
+.idea/
+.vscode/
+*.swp
