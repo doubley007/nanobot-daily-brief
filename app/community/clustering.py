@@ -39,7 +39,11 @@ logger = logging.getLogger(__name__)
 OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1").rstrip("/")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
 EMBED_TIMEOUT = 20
-SIMILARITY_THRESHOLD = float(os.getenv("COMMUNITY_CLUSTER_THRESHOLD", "0.72"))
+# Average-link threshold on nomic-embed-text. Calibrated empirically on the
+# Reddit hot feed: 0.70 produces 3-5 event-level clusters of 2-4 posts each
+# (oil+hormuz, yuan-pricing, portfolio-advice, etc.). Single-link chained
+# unrelated posts at this threshold; average-link is the reason it's safe.
+SIMILARITY_THRESHOLD = float(os.getenv("COMMUNITY_CLUSTER_THRESHOLD", "0.70"))
 
 
 _EMBED_FALLBACK_WARNED = False
@@ -98,26 +102,46 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 
 def _agglomerative(vectors: list[list[float]], threshold: float) -> list[list[int]]:
-    """Simple single-link agglomerative clustering by cosine similarity."""
-    n = len(vectors)
-    cluster_of: list[int] = list(range(n))  # each point in its own cluster
+    """
+    Average-link agglomerative clustering by cosine similarity.
 
+    Single-link (nearest-neighbor merge) is known to produce long chains when
+    the threshold is anywhere near the bulk of the pairwise distribution.
+    Average-link only merges when the *mean* similarity between all points
+    in two clusters meets the threshold — this resists chaining while
+    still being O(n^2) at this scale.
+    """
+    n = len(vectors)
+    if n == 0:
+        return []
+
+    # Precompute pairwise sims once
+    sims: list[list[float]] = [[0.0] * n for _ in range(n)]
     for i in range(n):
         for j in range(i + 1, n):
-            if cluster_of[i] == cluster_of[j]:
-                continue
-            if _cosine(vectors[i], vectors[j]) >= threshold:
-                # merge cluster_of[j] into cluster_of[i]
-                old = cluster_of[j]
-                new = cluster_of[i]
-                for k in range(n):
-                    if cluster_of[k] == old:
-                        cluster_of[k] = new
+            s = _cosine(vectors[i], vectors[j])
+            sims[i][j] = s
+            sims[j][i] = s
 
-    buckets: dict[int, list[int]] = defaultdict(list)
-    for idx, cid in enumerate(cluster_of):
-        buckets[cid].append(idx)
-    return list(buckets.values())
+    clusters: list[list[int]] = [[i] for i in range(n)]
+
+    def _avg_link(a: list[int], b: list[int]) -> float:
+        return sum(sims[x][y] for x in a for y in b) / (len(a) * len(b))
+
+    while True:
+        best_i, best_j, best_s = -1, -1, threshold
+        for i in range(len(clusters)):
+            for j in range(i + 1, len(clusters)):
+                s = _avg_link(clusters[i], clusters[j])
+                if s >= best_s:
+                    best_s = s
+                    best_i, best_j = i, j
+        if best_i < 0:
+            break
+        clusters[best_i].extend(clusters[best_j])
+        del clusters[best_j]
+
+    return clusters
 
 
 # ─── Cluster building ────────────────────────────────────────────────────────

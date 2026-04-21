@@ -126,25 +126,68 @@ def _count_reactions(message: dict[str, Any]) -> int:
     return sum(r.get("count", 0) for r in reactions)
 
 
+def _extract_message_text(msg: dict[str, Any]) -> str:
+    """
+    Pull usable text from a Discord message.
+
+    Discord messages carry content in several places:
+      - `content`: the user-typed text (empty for pure forwards / embeds)
+      - `message_snapshots[].message.content`: the text of a forwarded message
+      - `embeds[].title` + `embeds[].description`: link previews / rich embeds
+
+    Curated financial Discord servers often operate by forwarding news
+    articles or cross-posting from other channels, so the snapshot + embed
+    paths are the primary content source, not the fallback.
+    """
+    parts: list[str] = []
+
+    content = (msg.get("content") or "").strip()
+    if content:
+        parts.append(content)
+
+    for snap in msg.get("message_snapshots") or []:
+        snap_msg = (snap or {}).get("message") or {}
+        snap_content = (snap_msg.get("content") or "").strip()
+        if snap_content:
+            parts.append(snap_content)
+        for embed in snap_msg.get("embeds") or []:
+            title = (embed.get("title") or "").strip()
+            desc = (embed.get("description") or "").strip()
+            if title or desc:
+                parts.append(f"{title} {desc}".strip())
+
+    for embed in msg.get("embeds") or []:
+        title = (embed.get("title") or "").strip()
+        desc = (embed.get("description") or "").strip()
+        if title or desc:
+            parts.append(f"{title} {desc}".strip())
+
+    return "\n".join(p for p in parts if p).strip()
+
+
 def _parse_messages(raw_messages: list[dict[str, Any]], channel_id: str) -> list[CommunityPost]:
     """Convert raw Discord messages into CommunityPost objects."""
     posts: list[CommunityPost] = []
     for msg in raw_messages:
-        # Skip bot messages
-        author = msg.get("author", {})
-        if author.get("bot", False):
+        # Skip bot messages — except self-forwarded/webhook content which many
+        # news aggregation channels rely on (webhooks mark author.bot = true).
+        # Keep the message if it carries forwarded or embed content.
+        text = _extract_message_text(msg)
+        if not text:
             continue
 
-        content = msg.get("content", "").strip()
-        if not content:
+        author = msg.get("author", {})
+        is_bot = author.get("bot", False)
+        has_forwarded_content = bool(msg.get("message_snapshots") or msg.get("embeds"))
+        if is_bot and not has_forwarded_content:
             continue
 
         reaction_count = _count_reactions(msg)
 
         posts.append(CommunityPost(
-            title=content,
+            title=text,
             score=reaction_count,
-            num_comments=0,  # Discord doesn't have threaded replies in the same way
+            num_comments=0,
             url=f"https://discord.com/channels/_/{channel_id}/{msg.get('id', '')}",
             subreddit="discord",  # reuse field to mark source platform
             created_utc=0.0,
