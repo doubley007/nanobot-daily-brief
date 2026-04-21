@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from community.base import CommunitySentiment as _CS
+    from community.schema import CommunityAnalystReport as _CAR
 
 
 # =========================
@@ -34,6 +38,8 @@ class BriefingInput:
     market_snapshot: MarketSnapshot
     news_items: List[NewsItem] = field(default_factory=list)
     watchlist: List[str] = field(default_factory=list)
+    community_sentiments: list = field(default_factory=list)  # list[CommunitySentiment]
+    community_report: Optional["_CAR"] = None  # CommunityAnalystReport
 
 
 # =========================
@@ -232,18 +238,11 @@ def prepare_news_items(
     items.sort(key=lambda x: x.importance_score, reverse=True)
 
     selected = select_diverse_top_items(items, top_n=top_n)
-    enriched = enrich_news_items(selected, llm_callable=llm_callable)
-
-    selected = select_diverse_top_items(items, top_n=top_n)
 
     if not selected:
-         selected = items[:top_n]
+        selected = items[:top_n]
 
     enriched = enrich_news_items(selected, llm_callable=llm_callable)
-
-    print(f"DEBUG selected news count = {len(selected)}")
-    for i, item in enumerate(selected, start=1):
-        print(f"DEBUG selected {i}: {item.title}")
 
     return enriched
 
@@ -304,7 +303,7 @@ def format_market_snapshot(snapshot: MarketSnapshot) -> str:
     )
 
 
-def format_news_section(news_items: List[NewsItem]) -> str:
+def format_news_section(news_items: List[NewsItem], linked_reactions: Optional[dict] = None) -> str:
     if not news_items:
         return (
             "📰 今日重点\n"
@@ -312,6 +311,8 @@ def format_news_section(news_items: List[NewsItem]) -> str:
             "   - 影响：市场较平静时，观察存量趋势和后续数据窗口更重要。"
         )
 
+    if linked_reactions is None:
+        linked_reactions = {}
 
     lines = ["📰 今日重点"]
     for idx, item in enumerate(news_items, start=1):
@@ -328,7 +329,195 @@ def format_news_section(news_items: List[NewsItem]) -> str:
       else:
         lines.append("   - 对组合影响：这条信息有助于判断当天组合风险偏好和市场主线变化。")
 
+      # Linked community reaction
+      reaction = linked_reactions.get(idx - 1)  # idx is 1-based, dict is 0-based
+      if reaction:
+        sent_cn = _SENTIMENT_CN.get(reaction.sentiment, "中性")
+        angle = reaction.topic_label or reaction.discussion_focus
+        line = f"   - 社区反应：{reaction.post_count} 条讨论 · 情绪{sent_cn}"
+        if angle:
+            line += f" · {angle}"
+        lines.append(line)
+
     return "\n".join(lines)
+
+
+_SENTIMENT_CN = {
+    "bullish": "偏多",
+    "bearish": "偏空",
+    "neutral": "中性",
+    "mixed": "分歧",
+}
+
+
+_DIMENSION_CN = {
+    "optimism": "乐观",
+    "fear": "恐惧",
+    "uncertainty": "不确定",
+    "skepticism": "质疑",
+    "hype": "炒作",
+}
+
+
+_DOMINANT_DIMENSION_THRESHOLD = 0.55
+
+
+def _format_sentiment_readout(profile) -> str:
+    """
+    Render a sentiment profile. Only surface a dominant dimension when it's
+    meaningfully strong (>= 0.55). Below that, 『偏多·主导恐惧(0.40)』 reads
+    confidently but actually means nothing — better to render just the label.
+    """
+    label_cn = _SENTIMENT_CN.get(profile.label, "中性")
+    if profile.dominant_dimension and profile.intensity >= _DOMINANT_DIMENSION_THRESHOLD:
+        dim_cn = _DIMENSION_CN.get(profile.dominant_dimension, profile.dominant_dimension)
+        return f"{label_cn}·主导{dim_cn}({profile.intensity:.2f})"
+    return label_cn
+
+
+def _format_topic_lines(topic, idx: int, compact: bool = False) -> list[str]:
+    """
+    Render a single TopicCluster. `compact` trims reasoning lines when
+    we only have one platform and the section would otherwise be
+    dominated by a single noisy topic.
+    """
+    headline = (getattr(topic, "headline", "") or "").strip()
+    primary = headline or topic.rule_label or "（未命名主题）"
+    platforms = "/".join(topic.platforms) if topic.platforms else ""
+    rising = " 🔥升温" if getattr(topic, "is_rising", False) else ""
+
+    # Meta chip: [reddit | 7贴 | 可信度 0.48]
+    meta_parts = []
+    if platforms:
+        meta_parts.append(platforms)
+    meta_parts.append(f"{topic.post_count}贴")
+    meta_parts.append(f"可信度{topic.credibility.overall:.2f}")
+    if topic.credibility.is_noise:
+        meta_parts.append("噪音")
+    meta = f"[{' | '.join(meta_parts)}]"
+
+    # Sentiment readout only when credibility is not noise AND intensity is strong
+    if topic.credibility.is_noise or topic.sentiment.intensity < _DOMINANT_DIMENSION_THRESHOLD:
+        sent_suffix = ""
+    else:
+        sent = _format_sentiment_readout(topic.sentiment)
+        sent_suffix = f" · {sent}"
+
+    header = f"{idx}. 📍 {primary}{rising}  {meta}{sent_suffix}"
+    lines = [header]
+
+    if topic.discussion_focus:
+        lines.append(f"   争论点：{topic.discussion_focus}")
+    if topic.market_relevance:
+        lines.append(f"   市场含义：{topic.market_relevance}")
+    if topic.insurance_angle:
+        lines.append(f"   保险角度：{topic.insurance_angle}")
+
+    # Reasons line adds length without adding much signal when compact
+    if not compact:
+        reasons = (getattr(topic, "reasons", "") or "").strip()
+        if reasons:
+            lines.append(f"   理由：{reasons}")
+
+    return lines
+
+
+def format_community_section(
+    sentiments: list,
+    unlinked_topics: Optional[list] = None,
+    analyst_report=None,
+) -> str:
+    """
+    Render the community section, driven by the Community Analyst report.
+
+    Output shape:
+      - Platform + post-count header
+      - Sentiment structure paragraph (LLM cross-cluster read)
+      - Cross-platform signal (when multiple platforms agree)
+      - Top topics (analyst-selected headlines + any still unlinked)
+      - Insurance angle
+      - Editor recommendation
+    """
+    if not sentiments:
+        return ""
+
+    total_posts = sum(s.post_count for s in sentiments)
+    platforms = [s.platform.capitalize() for s in sentiments if s.post_count > 0]
+    platform_label = " + ".join(platforms) if platforms else "社区"
+
+    # Pick topics to render: prefer analyst-selected headlines, but fall back
+    # to unlinked or all when report is absent.
+    if analyst_report is not None and analyst_report.headline_topics:
+        primary_topics = analyst_report.headline_topics
+    elif unlinked_topics is not None:
+        primary_topics = unlinked_topics
+    else:
+        primary_topics = []
+        for s in sentiments:
+            primary_topics.extend(s.trending_topics)
+
+    # When both the analyst picked headlines AND the news pipeline linked some
+    # topics inline, keep the analyst's picks that are still unlinked.
+    if unlinked_topics is not None and analyst_report is not None and analyst_report.headline_topics:
+        unlinked_ids = {getattr(t, "cluster_id", id(t)) for t in unlinked_topics}
+        primary_topics = [
+            t for t in primary_topics
+            if getattr(t, "cluster_id", id(t)) in unlinked_ids
+        ]
+
+    primary_topics = [
+        t for t in primary_topics
+        if getattr(t, "should_include_in_brief", True) and not t.credibility.is_noise
+    ]
+
+    if not primary_topics and not analyst_report:
+        return ""
+
+    # Signal summary: N 贴 · M 聚类 · K 入选 · L 噪音
+    if analyst_report is not None:
+        summary_parts = [f"{total_posts} 贴"]
+        if analyst_report.total_clusters:
+            summary_parts.append(f"{analyst_report.total_clusters} 聚类")
+        summary_parts.append(f"{len(analyst_report.headline_topics)} 入选")
+        if analyst_report.noise_topics:
+            summary_parts.append(f"{len(analyst_report.noise_topics)} 噪音")
+        signal_summary = " · ".join(summary_parts)
+    else:
+        signal_summary = f"{total_posts} 贴"
+
+    lines = [
+        "💬 社区情绪解读",
+        f"{platform_label} · {signal_summary}",
+    ]
+
+    if analyst_report is not None:
+        # Platform coverage disclosure — surfaces 402 / not-configured states
+        coverage = [
+            s for s in analyst_report.platform_status
+            if s and not s.startswith(tuple(p.lower() + "=ok" for p in platforms))
+        ]
+        if coverage:
+            lines.append(f"数据覆盖：{' | '.join(coverage)}")
+
+        if analyst_report.sentiment_structure:
+            lines.append(f"情绪结构：{analyst_report.sentiment_structure}")
+        if analyst_report.cross_platform_signal:
+            lines.append(f"跨平台信号：{analyst_report.cross_platform_signal}")
+
+    if primary_topics:
+        compact = len(platforms) <= 1
+        lines.append("")
+        for idx, topic in enumerate(primary_topics, start=1):
+            lines.extend(_format_topic_lines(topic, idx, compact=compact))
+
+    if analyst_report is not None:
+        if analyst_report.insurance_angle:
+            lines.append("")
+            lines.append(f"🛡 保险组合含义：{analyst_report.insurance_angle}")
+        if analyst_report.brief_recommendation:
+            lines.append(f"📝 编辑建议：{analyst_report.brief_recommendation}")
+
+    return "\n".join(lines).rstrip()
 
 
 def format_watchlist(watchlist: List[str]) -> str:
@@ -356,6 +545,20 @@ def format_daily_brief(
     )
     takeaway = generate_market_takeaway(briefing_input.market_snapshot, prepared_news)
 
+    # ── News-to-community linking ──────────────────────────────────────
+    linked_reactions: dict = {}
+    unlinked_topics: Optional[list] = None
+
+    all_community_topics = []
+    for s in briefing_input.community_sentiments:
+        all_community_topics.extend(s.trending_topics)
+
+    if prepared_news and all_community_topics:
+        from community.linker import link_news_to_community, get_unlinked_topics
+        linked_reactions = link_news_to_community(prepared_news, all_community_topics)
+        unlinked_topics = get_unlinked_topics(all_community_topics, linked_reactions)
+
+    # ── Assemble brief ────────────────────────────────────────────────
     parts = [
         f"📌 每日金融简报 | {briefing_input.date_str}",
         "",
@@ -364,12 +567,24 @@ def format_daily_brief(
         "",
         format_market_snapshot(briefing_input.market_snapshot),
         "",
-        format_news_section(prepared_news),
+        format_news_section(prepared_news, linked_reactions),
+    ]
+
+    community_text = format_community_section(
+        briefing_input.community_sentiments,
+        unlinked_topics=unlinked_topics,
+        analyst_report=briefing_input.community_report,
+    )
+    if community_text:
+        parts.append("")
+        parts.append(community_text)
+
+    parts.extend([
         "",
         format_watchlist(briefing_input.watchlist),
         "",
         "#DailyBrief #Finance",
-    ]
+    ])
 
     return "\n".join(parts)
 
