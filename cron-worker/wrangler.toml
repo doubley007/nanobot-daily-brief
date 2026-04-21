@@ -1,0 +1,13 @@
+name = "nanobot-daily-brief-cron"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# Trigger: SGT 09:30 = UTC 01:30, every day.
+# Cloudflare cron uses UTC and fires within ~seconds of the scheduled time,
+# unlike GitHub Actions cron which routinely lags by tens of minutes.
+[triggers]
+crons = ["30 1 * * *"]
+
+# Secrets (set via `wrangler secret put`):
+#   GH_REPO   — "doubley007/nanobot-daily-brief"
+#   GH_TOKEN  — fine-grained PAT with Actions:read/write on the repo
