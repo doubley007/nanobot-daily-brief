@@ -178,8 +178,12 @@ def _parse_messages(raw_messages: list[dict[str, Any]], channel_id: str) -> list
 
         author = msg.get("author", {})
         is_bot = author.get("bot", False)
+        is_webhook = bool(msg.get("webhook_id"))
         has_forwarded_content = bool(msg.get("message_snapshots") or msg.get("embeds"))
-        if is_bot and not has_forwarded_content:
+        # Keep webhook posts — those are curated signal (our own feed or a
+        # news-aggregation webhook). Drop only raw bot chatter (e.g. mee6
+        # leveling messages) that lacks forwarded/embed content.
+        if is_bot and not is_webhook and not has_forwarded_content:
             continue
 
         reaction_count = _count_reactions(msg)
