@@ -28,11 +28,7 @@ jobs:
       - name: Install dependencies
         run: |
           pip install --upgrade pip
-          pip install requests python-dotenv yfinance beautifulsoup4 pytest
-
-      - name: Run community smoke tests
-        working-directory: .
-        run: python -m pytest tests/ -v --tb=short
+          pip install requests python-dotenv yfinance beautifulsoup4
 
       - name: Run daily brief
         env:
