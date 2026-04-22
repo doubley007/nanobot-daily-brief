@@ -86,17 +86,10 @@ def check_env_vars() -> list[str]:
     return warnings
 
 
-def check_ollama() -> bool:
-    """Check if the local Ollama service is reachable."""
-    import requests
-    base = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1").rstrip("/")
-    try:
-        # Ollama exposes a simple health endpoint at the root
-        health_url = base.replace("/v1", "")
-        resp = requests.get(health_url, timeout=5)
-        return resp.status_code == 200
-    except Exception:
-        return False
+def check_llm() -> bool:
+    """Check if the configured LLM backend is usable (Ollama or remote API)."""
+    from llm_adapter import check_llm_available
+    return check_llm_available()
 
 
 def run_preflight() -> tuple[bool, list[str]]:
@@ -112,9 +105,12 @@ def run_preflight() -> tuple[bool, list[str]]:
         log_message(f"FATAL: {fatal}", level="ERROR")
         return False, warnings
 
-    if not check_ollama():
-        warnings.append("Ollama service unreachable — LLM enrichment will use fallback rules")
-        log_message("Ollama not reachable at startup", level="WARN")
+    provider = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
+    if not check_llm():
+        warnings.append(
+            f"LLM backend ({provider}) unreachable — enrichment will use fallback rules"
+        )
+        log_message(f"LLM backend ({provider}) not reachable at startup", level="WARN")
 
     return True, warnings
 
@@ -241,9 +237,9 @@ def safe_get_community_sentiment(
 def build_daily_brief(status: dict[str, str]) -> str:
     from llm_adapter import local_llm_callable
 
-    llm_for_community = local_llm_callable if check_ollama() else None
+    llm_for_community = local_llm_callable if check_llm() else None
     if llm_for_community is None:
-        log_message("Ollama unreachable — community section will be hidden", level="WARN")
+        log_message("LLM backend unreachable — community section will be hidden", level="WARN")
 
     market_snapshot = safe_get_market_snapshot(status)
     news_items = safe_get_news_items(status)
@@ -264,7 +260,7 @@ def build_daily_brief(status: dict[str, str]) -> str:
 
     brief_text = format_daily_brief(
         briefing_input,
-        llm_callable=local_llm_callable,
+        llm_callable=llm_for_community,
     )
     log_message("Brief generated successfully.")
     return brief_text
