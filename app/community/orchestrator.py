@@ -21,6 +21,7 @@ from community.schema import (
     CommunitySentiment,
     TopicCluster,
 )
+from community.stocktwits_source import fetch_stocktwits_sentiment
 from community.x_source import XPlanUnavailableError, fetch_x_sentiment
 
 logger = logging.getLogger(__name__)
@@ -29,7 +30,12 @@ logger = logging.getLogger(__name__)
 def _disclose_x_failure(exc: Exception) -> str:
     """Human-readable platform status line for a failed X fetch."""
     if isinstance(exc, XPlanUnavailableError):
-        return "x=unavailable (plan 402)"
+        reason = getattr(exc, "reason", "") or "plan"
+        if reason == "CreditsDepleted":
+            # Paid plan, credits balance = 0. Very different signal from
+            # a tier block — the fix is buying credits, not changing code.
+            return "x=credits-depleted (账户余额为0)"
+        return f"x=plan-blocked (402, {reason})"
     return f"x=error ({type(exc).__name__})"
 
 
@@ -56,6 +62,7 @@ def run_community_analyst(
     for name, fetcher in (
         ("reddit", fetch_reddit_sentiment),
         ("x", fetch_x_sentiment),
+        ("stocktwits", fetch_stocktwits_sentiment),
         ("discord", fetch_discord_sentiment),
     ):
         try:
@@ -76,6 +83,8 @@ def run_community_analyst(
                 status_lines.append("x=unavailable or not configured")
             elif name == "discord":
                 status_lines.append("discord=not configured")
+            elif name == "stocktwits":
+                status_lines.append("stocktwits=no data (network or filter)")
             else:
                 status_lines.append(f"{name}=no data")
         else:

@@ -26,13 +26,18 @@ def reddit_to_unified(p: CommunityPost) -> UnifiedPost:
 
 
 def x_to_unified(p: CommunityPost) -> UnifiedPost:
-    # x_source reuses CommunityPost with subreddit="x"
+    # In curated-KOL mode, x_source stores "@handle" in the subreddit field
+    # so the cluster channel reflects the actual account, not a generic
+    # "recent_search" bucket. That makes breadth/diversity signals meaningful.
+    channel = p.subreddit if p.subreddit else "x"
+    author = p.subreddit.lstrip("@") if p.subreddit.startswith("@") else ""
     return UnifiedPost(
         platform="x",
         post_id=p.url.rsplit("/", 1)[-1] if "/" in p.url else "",
-        channel="recent_search",
+        channel=channel,
         title=p.title,
         url=p.url,
+        author=author,
         created_utc=p.created_utc,
         engagement_raw=p.score + p.num_comments * 3,
         engagement_breakdown={"likes": p.score, "replies": p.num_comments},
@@ -54,10 +59,35 @@ def discord_to_unified(p: CommunityPost) -> UnifiedPost:
     )
 
 
+def stocktwits_to_unified(p: CommunityPost) -> UnifiedPost:
+    # stocktwits_source stores the cashtag in `subreddit` as "$SPY" form.
+    # We also capture the author out of the URL path (stocktwits.com/<user>/message/<id>)
+    # so breadth / diversity scoring in clustering sees distinct authors.
+    author = ""
+    if p.url and "stocktwits.com/" in p.url:
+        try:
+            author = p.url.split("stocktwits.com/", 1)[1].split("/", 1)[0]
+        except IndexError:
+            author = ""
+    return UnifiedPost(
+        platform="stocktwits",
+        post_id=p.url.rsplit("/", 1)[-1] if "/" in p.url else "",
+        channel=p.subreddit or "stocktwits",
+        title=p.title,
+        url=p.url,
+        author=author,
+        created_utc=p.created_utc,
+        engagement_raw=p.score,
+        engagement_breakdown={"weighted": p.score, "likes": p.num_comments},
+        platform_specific={},
+    )
+
+
 _NORMALIZERS = {
     "reddit": reddit_to_unified,
     "x": x_to_unified,
     "discord": discord_to_unified,
+    "stocktwits": stocktwits_to_unified,
 }
 
 
