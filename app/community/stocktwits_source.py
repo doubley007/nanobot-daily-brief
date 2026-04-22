@@ -37,6 +37,7 @@ from community.analysis import (
     classify_post,
 )
 from community.base import CommunityPost, CommunitySentiment, TopicCluster
+from community.calibration import record_batch as record_calibration_batch
 from community.clustering import cluster_posts, mark_rising_clusters
 from community.llm_analyst import dedupe_posts, run_llm_pipeline
 from community.normalize import normalize_posts
@@ -238,17 +239,74 @@ def fetch_stocktwits_posts(config: StockTwitsFilterConfig) -> list[CommunityPost
 
 # ─── Filtering ───────────────────────────────────────────────────────────────
 
+# Authors to suppress outright — bot / paid-signal accounts seen in live
+# sampling. Matched case-insensitively against the username in the post URL.
+# Keep this list small and empirical; broad name matching produces false
+# positives for legitimate accounts like "FedWatch" or "AlgoCrypto_Research".
+_BLOCKED_AUTHORS = {
+    "dragonalgo",
+    "signalfeedbot",
+    "optionsbot",
+}
+
+# Structured pump-signal shape: posts that read like machine-generated option
+# plans. All three phrases have to appear — occasional human traders mention
+# one or two ("Entry 86.50, stop 85") without being pump accounts.
+_PUMP_SIGNAL_MARKERS = ("entry:", "stop:", "tp1")
+
+
+def _extract_author(post: CommunityPost) -> str:
+    url = post.url or ""
+    if "stocktwits.com/" not in url:
+        return ""
+    try:
+        return url.split("stocktwits.com/", 1)[1].split("/", 1)[0].lower()
+    except IndexError:
+        return ""
+
+
+def _is_pump_signal(title: str) -> bool:
+    """Detect structured option pump signals (Entry/Stop/TP1 template)."""
+    lower = title.lower()
+    hits = sum(1 for m in _PUMP_SIGNAL_MARKERS if m in lower)
+    return hits >= 3
+
+
+def _is_substantive(title: str) -> bool:
+    """
+    A very short post like "$SPY $DJT" or "$SPY havens …" is not a discussion,
+    it's a hot-take fragment. Without enough body there's nothing for the
+    topic classifier or LLM to reason about.
+
+    The threshold is measured against *non-cashtag* content length so that
+    "$SPY $QQQ $TLT" doesn't sneak through on pure cashtag count.
+    """
+    non_cashtag = " ".join(tok for tok in title.split() if not tok.startswith("$"))
+    return len(non_cashtag.strip()) >= 20
+
+
 def _passes_quality_threshold(
     post: CommunityPost, config: StockTwitsFilterConfig
 ) -> bool:
     """
-    Heuristic quality floor. Our engagement score already folds in
-    followers; we re-check the author follower count here because the
-    engagement number is capped and we don't want a capped score to
-    hide a shell-account post.
+    Multi-layer quality floor:
+      1. Author-level: blocklist of known bot/paid-signal accounts
+      2. Content-level: reject machine-generated option-plan templates
+      3. Content-level: reject trivially short posts that only contain cashtags
+      4. Engagement: derived from follower count, configurable floor
+
+    Each layer is narrow so false positives stay low. Broader filters
+    (multi-cashtag count, link density) were tested but flagged legitimate
+    macro posts, so they're deliberately not used.
     """
-    # Derive followers back out of score. Score = min(followers//50, 200).
-    # If the author had < min_followers, approximate score threshold.
+    if _extract_author(post) in _BLOCKED_AUTHORS:
+        return False
+    if _is_pump_signal(post.title):
+        return False
+    if not _is_substantive(post.title):
+        return False
+
+    # Engagement floor, approximate. Score = min(followers//50, 200) + like*5.
     approx_followers_floor = config.min_followers // 50
     return post.score >= approx_followers_floor
 
@@ -383,6 +441,17 @@ def fetch_stocktwits_sentiment(
         top_n_topics=config.top_n_topics,
         llm_callable=llm_callable,
     )
+
+    # Calibration: log LLM label vs author-tag majority *before* the bias
+    # overrides the LLM output. We want to measure the raw LLM, not the
+    # already-biased sentiment, otherwise agreement is guaranteed-ish.
+    try:
+        wrote = record_calibration_batch(kept)
+        if wrote:
+            logger.info("StockTwits calibration: logged %d cluster rows", wrote)
+    except Exception as e:
+        logger.warning("Calibration logging failed (non-fatal): %s", e)
+
     kept = _apply_author_tag_bias(kept)
 
     return CommunitySentiment(
