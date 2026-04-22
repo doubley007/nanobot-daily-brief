@@ -29,7 +29,7 @@ from typing import Any
 import requests
 
 from community.analysis import classify_post
-from community.schema import TopicCluster, UnifiedPost
+from community.schema import TopicCluster, TrendProfile, UnifiedPost
 
 logger = logging.getLogger(__name__)
 
@@ -234,8 +234,10 @@ def mark_rising_clusters(
     rise_threshold: float = 1.8,
 ) -> list[TopicCluster]:
     """
-    Flag clusters whose heat is meaningfully above the cohort median.
-    Without historical data we use in-run relative heat as a proxy.
+    Flag clusters whose heat is meaningfully above the cohort median,
+    then derive lightweight trend descriptors (direction / persistence /
+    spread / breadth) from the same window. No historical store needed:
+    everything here is a read of the current fetch.
     """
     if not clusters:
         return clusters
@@ -245,4 +247,84 @@ def mark_rising_clusters(
     for c in clusters:
         c.rise_ratio = c.heat_score / mid if mid else 1.0
         c.is_rising = c.rise_ratio >= rise_threshold
+        c.trend = _derive_trend_profile(c)
     return clusters
+
+
+# ─── Lightweight trend descriptor ────────────────────────────────────────────
+
+_NEW_WINDOW_SECONDS = 6 * 3600      # posts this fresh → "new"
+_FADING_WINDOW_SECONDS = 36 * 3600  # posts this stale → "fading"
+
+
+def _derive_trend_profile(cluster: TopicCluster) -> TrendProfile:
+    """
+    Produce a trend readout from in-run signals only.
+
+    We don't have a historical baseline yet, so:
+      - direction uses (rise_ratio vs cohort) combined with post freshness
+      - persistence uses age spread of posts in the cluster
+      - spread uses platforms present in the cluster
+      - breadth uses distinct channels/authors
+
+    The goal is a *lightweight* judgment — enough for a reader to tell
+    "明显升温 vs 持续讨论 vs 热度回落 vs 新出现" at a glance.
+    """
+    posts = cluster.posts or []
+    timestamps = [p.created_utc for p in posts if p.created_utc]
+
+    # Direction: combine rise ratio with freshness
+    import time
+    now = time.time()
+    if timestamps:
+        newest_age = now - max(timestamps)
+        oldest_age = now - min(timestamps)
+    else:
+        newest_age = oldest_age = None
+
+    if cluster.rise_ratio >= 1.8:
+        direction = "rising"
+    elif newest_age is not None and newest_age <= _NEW_WINDOW_SECONDS and cluster.post_count <= 3:
+        direction = "new"
+    elif newest_age is not None and newest_age >= _FADING_WINDOW_SECONDS:
+        direction = "fading"
+    else:
+        direction = "stable"
+
+    # Persistence: how stretched in time is the discussion?
+    if oldest_age is None:
+        persistence = "continuing"
+    elif oldest_age <= _NEW_WINDOW_SECONDS:
+        persistence = "new"
+    elif oldest_age - (newest_age or 0) <= 2 * 3600 and cluster.post_count <= 3:
+        persistence = "short-lived"
+    else:
+        persistence = "continuing"
+
+    # Platform spread
+    platforms = set(cluster.platforms)
+    if len(platforms) >= 2:
+        spread = "cross-platform"
+    elif len(platforms) == 1:
+        only = next(iter(platforms))
+        spread = f"{only}-led" if only in {"reddit", "discord", "x"} else "single-platform"
+    else:
+        spread = "single-platform"
+
+    # Discussion breadth — distinct channels + authors
+    channels = {p.channel for p in posts if p.channel}
+    authors = {p.author for p in posts if p.author}
+    width = len(channels) + len(authors)
+    if width >= 6 or cluster.post_count >= 6:
+        breadth = "broad"
+    elif width >= 3 or cluster.post_count >= 3:
+        breadth = "moderate"
+    else:
+        breadth = "narrow"
+
+    return TrendProfile(
+        trend_direction=direction,
+        persistence=persistence,
+        platform_spread=spread,
+        discussion_breadth=breadth,
+    )

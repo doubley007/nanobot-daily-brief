@@ -26,6 +26,7 @@ from typing import Callable
 from community.schema import (
     CommunityAnalystReport,
     CredibilityProfile,
+    InsuranceFramework,
     SentimentProfile,
     TopicCluster,
     UnifiedPost,
@@ -123,11 +124,13 @@ _CLUSTER_PROMPT_EXAMPLE = (
     '  "real_topic": "FOMC 纪要转鸽推升二季度降息押注",\n'
     '  "discussion_focus": "多头认为CPI趋缓已到降息临界点；空头担心劳动市场仍紧、降息被推迟",\n'
     '  "market_relevance": "利好久期（10Y 利率下行空间），利好金矿与利率敏感股；对银行净息差形成压力",\n'
-    '  "insurance_angle": "偏多久期窗口打开，可逐步把固收久期延长0.3-0.5年；信用利差大概率继续收窄，可保持IG敞口不减，但仍不宜加杠杆承接HY"\n'
+    '  "insurance_implications": "对久期管理可能打开延长窗口；对信用利差存在进一步收窄的方向压力；再投资收益率的走向需结合后续利率路径确认",\n'
+    '  "insurance_triggers": "继续观察长端利率是否有效跌破4.10%；只有在伴随更软的通胀或劳动力数据时，才考虑真正延长久期"\n'
     '}\n'
     '反面示例（禁止）：\n'
     '- "对商品市场风险影响"（方向不明、和 real_topic 重复）\n'
-    '- "关注信用利差和汇率变动"（没说涨跌、没说怎么动）\n'
+    '- "延长固收久期0.3-0.5年"（证据链不够强时不应给出这种具体数字指令）\n'
+    '- "关注信用利差和汇率变动"（没说方向、没说观察条件）\n'
     '- "市场关注美联储政策"（泛化总结）\n\n'
 )
 
@@ -152,8 +155,10 @@ def _build_cluster_prompt(cluster: TopicCluster) -> str:
         "严格输出一个 JSON（不要 markdown、不要解释）。硬规则：\n"
         "- market_relevance 必须包含『利好/利空/施压/承压/收窄/走阔/上行/下行』等方向词，"
         "且必须点名至少一类资产（久期 / 股指 / 信用利差 / 商品 / 外汇）。\n"
-        "- insurance_angle 必须包含至少一个可执行动作词（延长/缩短久期、加仓/减仓、"
-        "保持、观望、对冲、切换），否则视为无效。\n"
+        "- insurance_implications 写成『可能影响 / 对X存在压力 / 需结合Y确认』这类观察性语言，"
+        "涵盖 固收久期 / 信用配置 / 再投资收益率 / 利率敏感资产 中的 1-2 项。"
+        "不要给出具体的加减仓数字（例如『延长0.3年』『减5%』），除非 credibility_judgment >= 0.8 且证据非常直接。\n"
+        "- insurance_triggers 必须指明『继续观察什么』以及『只有在什么条件成立时才考虑进一步动作』。\n"
         "- 禁止使用：『市场关注』『投资者讨论』『需留意』『构成影响』这类无方向表述。\n"
         "- 禁止把 real_topic 和 market_relevance 写成同一句话。\n"
         "- sentiment_dimensions 中，只有确实主导情绪时才给 >= 0.6 的分。"
@@ -172,7 +177,8 @@ def _build_cluster_prompt(cluster: TopicCluster) -> str:
         '  "is_noise": true/false,\n'
         '  "should_include_in_brief": true/false。仅当对宏观/大类配置/风险判断有价值时 true,\n'
         '  "market_relevance": "30-50字。方向明确 + 点名资产类别。若 should_include=false 返回空字符串",\n'
-        '  "insurance_angle": "30-60字。包含动作词 + 具体组合维度（久期/信用/房地产/外汇/本地市场）。若不适用返回空字符串"\n'
+        '  "insurance_implications": "40-70字。保险/配置含义，观察性语言，不给具体数字指令",\n'
+        '  "insurance_triggers": "30-60字。继续观察的变量 + 触发进一步动作的条件"\n'
         "}"
     )
 
@@ -198,7 +204,19 @@ def analyze_topic_cluster(
     cluster.discussion_focus = (data.get("discussion_focus") or "").strip()
     cluster.reasons = (data.get("reasons") or "").strip()
     cluster.market_relevance = (data.get("market_relevance") or "").strip()
-    cluster.insurance_angle = (data.get("insurance_angle") or "").strip()
+    # Two-layer insurance framework (preferred). Keep legacy `insurance_angle`
+    # populated by concatenation so older formatters still work.
+    implications = (data.get("insurance_implications") or "").strip()
+    triggers = (data.get("insurance_triggers") or "").strip()
+    # Backward compat: some prompts may still return a single field.
+    legacy_angle = (data.get("insurance_angle") or "").strip()
+    if not implications and legacy_angle:
+        implications = legacy_angle
+    cluster.insurance_framework = InsuranceFramework(
+        implications=implications,
+        triggers=triggers,
+    )
+    cluster.insurance_angle = " ".join(p for p in [implications, triggers] if p).strip() or legacy_angle
     cluster.should_include_in_brief = bool(data.get("should_include_in_brief", False))
 
     # Multi-dim sentiment
@@ -295,19 +313,23 @@ def _build_analyst_prompt(
         "硬规则：\n"
         "- headline_topics 必须至少有一个 cluster 的 credibility >= 0.5；"
         "若所有 cluster 都是噪音或可信度不足，返回空数组。\n"
-        "- insurance_angle 必须包含动作词（延长/缩短/加仓/减仓/对冲/保持/观望/切换）"
-        "并点名具体组合维度（久期/信用/房地产/外汇/本地市场）。\n"
+        "- sentiment_structure 必须使用业务语言（如：观望为主+不确定性较高 / 分歧明显+担忧主导 / "
+        "避险情绪升温），不要使用『分歧·主导X(0.70)』这种模型标签形式。\n"
+        "- insurance_implications 用观察性语言描述『对久期/信用/再投资收益率/利率敏感资产的可能影响』，"
+        "避免直接给出具体加减仓数字（如『延长0.3年』），除非多条 cluster 的 credibility 都 >= 0.7。\n"
+        "- insurance_triggers 必须说明『继续观察什么变量』+『只有在什么条件成立时才考虑进一步动作』。\n"
         "- 禁止『市场关注』『值得留意』『构成影响』等无方向表述。\n\n"
         "严格输出 JSON：\n"
         "{\n"
         '  "headline_topics": [最多 3 个 cluster 序号的数字数组],\n'
         '  "noise_topics": [最多 3 个 cluster 序号的数字数组],\n'
-        '  "sentiment_structure": "80-140字。描述多维情绪组合（如：乐观与怀疑并存 / 高不确定+避险 / '
-        '炒作主导但缺乏基本面支撑），而不是单点打标签",\n'
+        '  "sentiment_structure": "60-110字。业务语言描述整体情绪组合（如：观望为主，不确定性较高；'
+        '分歧明显，担忧主导；避险情绪升温）。不要使用模型标签形式",\n'
         f"{cross_platform_rule},\n"
-        '  "insurance_angle": "60-120字。必须方向明确 + 可执行动作。'
-        "覆盖固定收益久期、信用利差、区域/房地产敞口、外汇流动性中的 1-2 项，"
-        '不要写成『要关注X』的空话",\n'
+        '  "insurance_implications": "50-100字。保险组合各维度可能受影响的方向（久期/信用/再投资收益率/'
+        '利率敏感资产中的 1-2 项），采用观察性语言，不给具体数字指令",\n'
+        '  "insurance_triggers": "40-80字。继续观察的 1-2 个关键变量 + 触发进一步动作的条件（例如长端利率'
+        '是否有效跌破/突破某一区间、情绪是否向X/主流媒体扩散）",\n'
         '  "brief_recommendation": "40-80字。告诉日报编辑今天社区部分应突出哪个主题、'
         '弱化哪个主题，说明理由"\n'
         "}"
@@ -355,7 +377,16 @@ def community_analyst_report(
     report.noise_topics = _pick(data.get("noise_topics", []))
     report.sentiment_structure = (data.get("sentiment_structure") or "").strip()
     report.cross_platform_signal = (data.get("cross_platform_signal") or "").strip()
-    report.insurance_angle = (data.get("insurance_angle") or "").strip()
+    implications = (data.get("insurance_implications") or "").strip()
+    triggers = (data.get("insurance_triggers") or "").strip()
+    legacy_angle = (data.get("insurance_angle") or "").strip()
+    if not implications and legacy_angle:
+        implications = legacy_angle
+    report.insurance_framework = InsuranceFramework(
+        implications=implications,
+        triggers=triggers,
+    )
+    report.insurance_angle = " ".join(p for p in [implications, triggers] if p).strip() or legacy_angle
     report.brief_recommendation = (data.get("brief_recommendation") or "").strip()
     return report
 

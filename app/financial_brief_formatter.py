@@ -350,41 +350,29 @@ _SENTIMENT_CN = {
 }
 
 
-_DIMENSION_CN = {
-    "optimism": "乐观",
-    "fear": "恐惧",
-    "uncertainty": "不确定",
-    "skepticism": "质疑",
-    "hype": "炒作",
-}
-
-
-_DOMINANT_DIMENSION_THRESHOLD = 0.55
-
-
-def _format_sentiment_readout(profile) -> str:
-    """
-    Render a sentiment profile. Only surface a dominant dimension when it's
-    meaningfully strong (>= 0.55). Below that, 『偏多·主导恐惧(0.40)』 reads
-    confidently but actually means nothing — better to render just the label.
-    """
-    label_cn = _SENTIMENT_CN.get(profile.label, "中性")
-    if profile.dominant_dimension and profile.intensity >= _DOMINANT_DIMENSION_THRESHOLD:
-        dim_cn = _DIMENSION_CN.get(profile.dominant_dimension, profile.dominant_dimension)
-        return f"{label_cn}·主导{dim_cn}({profile.intensity:.2f})"
-    return label_cn
-
-
 def _format_topic_lines(topic, idx: int, compact: bool = False) -> list[str]:
     """
     Render a single TopicCluster. `compact` trims reasoning lines when
     we only have one platform and the section would otherwise be
     dominated by a single noisy topic.
+
+    Compared to the old renderer: this version leads with business-language
+    trend + sentiment phrases (via community.verbalize) and only shows the
+    numeric score tail as supplemental. It also renders the two-layer
+    insurance framework (配置含义 + 观察/触发条件) instead of a single
+    free-text 保险角度 line.
     """
+    from community.verbalize import (
+        derive_insurance_framework,
+        render_insurance_framework,
+        sentiment_score_tail,
+        verbalize_sentiment,
+        verbalize_trend,
+    )
+
     headline = (getattr(topic, "headline", "") or "").strip()
     primary = headline or topic.rule_label or "（未命名主题）"
     platforms = "/".join(topic.platforms) if topic.platforms else ""
-    rising = " 🔥升温" if getattr(topic, "is_rising", False) else ""
 
     # Meta chip: [reddit | 7贴 | 可信度 0.48]
     meta_parts = []
@@ -396,22 +384,34 @@ def _format_topic_lines(topic, idx: int, compact: bool = False) -> list[str]:
         meta_parts.append("噪音")
     meta = f"[{' | '.join(meta_parts)}]"
 
-    # Sentiment readout only when credibility is not noise AND intensity is strong
-    if topic.credibility.is_noise or topic.sentiment.intensity < _DOMINANT_DIMENSION_THRESHOLD:
-        sent_suffix = ""
-    else:
-        sent = _format_sentiment_readout(topic.sentiment)
-        sent_suffix = f" · {sent}"
-
-    header = f"{idx}. 📍 {primary}{rising}  {meta}{sent_suffix}"
+    header = f"{idx}. 📍 {primary}  {meta}"
     lines = [header]
+
+    # Trend line — always show when we have a trend profile
+    trend = getattr(topic, "trend", None)
+    if trend is not None:
+        trend_phrase = verbalize_trend(trend)
+        if trend_phrase:
+            lines.append(f"   趋势：{trend_phrase}")
+
+    # Sentiment line — business phrase first, numeric tail in parens
+    if not topic.credibility.is_noise:
+        sent_phrase = verbalize_sentiment(topic.sentiment)
+        tail = sentiment_score_tail(topic.sentiment)
+        if sent_phrase:
+            lines.append(f"   情绪：{sent_phrase}{tail}")
 
     if topic.discussion_focus:
         lines.append(f"   争论点：{topic.discussion_focus}")
     if topic.market_relevance:
         lines.append(f"   市场含义：{topic.market_relevance}")
-    if topic.insurance_angle:
-        lines.append(f"   保险角度：{topic.insurance_angle}")
+
+    # Insurance framework (two-layer). Prefer LLM-provided; fall back to
+    # derived observation framework so we never show a bare instruction.
+    framework = getattr(topic, "insurance_framework", None)
+    if framework is None or (not framework.implications and not framework.triggers):
+        framework = derive_insurance_framework(topic)
+    lines.extend(render_insurance_framework(framework))
 
     # Reasons line adds length without adding much signal when compact
     if not compact:
@@ -426,6 +426,7 @@ def format_community_section(
     sentiments: list,
     unlinked_topics: Optional[list] = None,
     analyst_report=None,
+    news_social_bridge: Optional[str] = None,
 ) -> str:
     """
     Render the community section, driven by the Community Analyst report.
@@ -500,9 +501,18 @@ def format_community_section(
             lines.append(f"数据覆盖：{' | '.join(coverage)}")
 
         if analyst_report.sentiment_structure:
-            lines.append(f"情绪结构：{analyst_report.sentiment_structure}")
+            lines.append(f"整体情绪：{analyst_report.sentiment_structure}")
         if analyst_report.cross_platform_signal:
             lines.append(f"跨平台信号：{analyst_report.cross_platform_signal}")
+
+    # News ↔ Social bridge — bridges the news section and community topics.
+    # Rendered after sentiment structure so reader sees the comparison
+    # before diving into individual topics.
+    bridge_text = news_social_bridge
+    if not bridge_text and analyst_report is not None:
+        bridge_text = analyst_report.news_social_bridge
+    if bridge_text:
+        lines.append(f"新闻 ↔ 社区：{bridge_text}")
 
     if primary_topics:
         compact = len(platforms) <= 1
@@ -511,9 +521,19 @@ def format_community_section(
             lines.extend(_format_topic_lines(topic, idx, compact=compact))
 
     if analyst_report is not None:
-        if analyst_report.insurance_angle:
+        framework = getattr(analyst_report, "insurance_framework", None)
+        has_framework = framework is not None and (framework.implications or framework.triggers)
+        if has_framework:
             lines.append("")
-            lines.append(f"🛡 保险组合含义：{analyst_report.insurance_angle}")
+            lines.append("🛡 保险组合视角（观察框架）")
+            if framework.implications:
+                lines.append(f"   配置含义：{framework.implications}")
+            if framework.triggers:
+                lines.append(f"   观察/触发条件：{framework.triggers}")
+        elif analyst_report.insurance_angle:
+            # Legacy fallback — still render as observation, not instruction
+            lines.append("")
+            lines.append(f"🛡 保险组合视角：{analyst_report.insurance_angle}")
         if analyst_report.brief_recommendation:
             lines.append(f"📝 编辑建议：{analyst_report.brief_recommendation}")
 
@@ -548,6 +568,7 @@ def format_daily_brief(
     # ── News-to-community linking ──────────────────────────────────────
     linked_reactions: dict = {}
     unlinked_topics: Optional[list] = None
+    news_social_bridge: str = ""
 
     all_community_topics = []
     for s in briefing_input.community_sentiments:
@@ -557,6 +578,23 @@ def format_daily_brief(
         from community.linker import link_news_to_community, get_unlinked_topics
         linked_reactions = link_news_to_community(prepared_news, all_community_topics)
         unlinked_topics = get_unlinked_topics(all_community_topics, linked_reactions)
+
+    # ── News ↔ Social narrative bridge ────────────────────────────────
+    # Short deterministic comparison between today's news and community
+    # narratives. Produced here so both the community formatter and any
+    # future consumer can reuse the same string.
+    headline_topics = (
+        briefing_input.community_report.headline_topics
+        if briefing_input.community_report is not None
+        else all_community_topics
+    )
+    if prepared_news and headline_topics:
+        from community.verbalize import build_news_social_bridge
+        news_social_bridge = build_news_social_bridge(
+            prepared_news, headline_topics, len(linked_reactions)
+        )
+        if briefing_input.community_report is not None and not briefing_input.community_report.news_social_bridge:
+            briefing_input.community_report.news_social_bridge = news_social_bridge
 
     # ── Assemble brief ────────────────────────────────────────────────
     parts = [
@@ -574,6 +612,7 @@ def format_daily_brief(
         briefing_input.community_sentiments,
         unlinked_topics=unlinked_topics,
         analyst_report=briefing_input.community_report,
+        news_social_bridge=news_social_bridge,
     )
     if community_text:
         parts.append("")

@@ -12,8 +12,10 @@ from community.schema import (
     CommunityAnalystReport,
     CommunitySentiment,
     CredibilityProfile,
+    InsuranceFramework,
     SentimentProfile,
     TopicCluster,
+    TrendProfile,
     UnifiedPost,
 )
 
@@ -43,5 +45,7 @@ __all__ = [
     "UnifiedPost",
     "SentimentProfile",
     "CredibilityProfile",
+    "InsuranceFramework",
+    "TrendProfile",
     "CommunityAnalystReport",
 ]

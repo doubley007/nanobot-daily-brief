@@ -81,6 +81,47 @@ class SentimentProfile:
         }
 
 
+# ─── Trend profile (what is "trending" about this cluster) ───────────────────
+
+@dataclass
+class TrendProfile:
+    """
+    Lightweight trend descriptors. Populated deterministically from the
+    current window — no historical store required. When a field is
+    unknown we fall back to a conservative value rather than guess.
+
+    trend_direction:     "rising" | "stable" | "fading" | "new"
+    persistence:         "new" | "continuing" | "short-lived"
+    platform_spread:     "reddit-led" | "discord-led" | "x-led"
+                         | "cross-platform" | "single-platform"
+    discussion_breadth:  "narrow" | "moderate" | "broad"
+    """
+    trend_direction: str = "stable"
+    persistence: str = "continuing"
+    platform_spread: str = "single-platform"
+    discussion_breadth: str = "narrow"
+
+
+# ─── Insurance-view framework (observation, not direct instruction) ──────────
+
+@dataclass
+class InsuranceFramework:
+    """
+    Two-layer insurance readout:
+      implications: what this *could* mean for different parts of the book
+                    (duration, credit, reinvestment yield, rate-sensitive
+                    assets). Deliberately framed as implications, not
+                    instructions.
+      triggers:     what needs to be true before considering a real action,
+                    plus what variable to keep watching.
+
+    Raw `insurance_angle` (legacy free-text) is kept for backward
+    compatibility; new code should prefer the structured view.
+    """
+    implications: str = ""
+    triggers: str = ""
+
+
 # ─── Signal-vs-noise scoring ─────────────────────────────────────────────────
 
 @dataclass
@@ -125,8 +166,10 @@ class TopicCluster:
     discussion_focus: str = ""
     reasons: str = ""
     market_relevance: str = ""           # general market angle
-    insurance_angle: str = ""            # explicitly for insurance investors
+    insurance_angle: str = ""            # legacy free-text; kept for back-compat
+    insurance_framework: InsuranceFramework = field(default_factory=InsuranceFramework)
     sentiment: SentimentProfile = field(default_factory=SentimentProfile)
+    trend: TrendProfile = field(default_factory=TrendProfile)
     credibility: CredibilityProfile = field(default_factory=CredibilityProfile)
     should_include_in_brief: bool = True
 
@@ -150,8 +193,10 @@ class CommunityAnalystReport:
     noise_topics: list[TopicCluster] = field(default_factory=list)
     sentiment_structure: str = ""        # one-paragraph read of emotional mix
     cross_platform_signal: str = ""      # what multiple platforms agree on
-    insurance_angle: str = ""            # implications for insurance portfolio
+    insurance_angle: str = ""            # legacy free-text; prefer insurance_framework
+    insurance_framework: InsuranceFramework = field(default_factory=InsuranceFramework)
     brief_recommendation: str = ""       # what should go into today's brief
+    news_social_bridge: str = ""         # 1-3 sentence narrative bridge
     platforms_covered: list[str] = field(default_factory=list)
     total_posts: int = 0
     total_clusters: int = 0              # how many clusters fed into the analyst
