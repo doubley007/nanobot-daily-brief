@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -7,6 +8,8 @@ import requests
 from dotenv import load_dotenv
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 FMP_STOCK_NEWS_URL = "https://financialmodelingprep.com/stable/news/stock"
 FMP_GENERAL_NEWS_URL = "https://financialmodelingprep.com/stable/news/general-latest"
@@ -39,85 +42,73 @@ def _normalize_fmp_item(item: dict[str, Any], category: str) -> dict[str, Any] |
     }
 
 
-def fetch_from_fmp_stock_news(
-    limit: int = 20,
-    timeout: int = 15,
+def _fetch_fmp(
+    url: str,
+    label: str,
+    category: str,
+    limit: int,
+    timeout: int,
 ) -> list[dict[str, Any]]:
     try:
         api_key = _get_api_key()
-    except Exception as e:
-        print(f"WARNING fmp stock news skipped: {e}")
+    except ValueError as e:
+        logger.info("FMP %s skipped: %s", label, e)
         return []
 
-    params = {
-        "apikey": api_key,
-        "page": 0,
-        "limit": limit,
-    }
+    params = {"apikey": api_key, "page": 0, "limit": limit}
 
     try:
-        response = requests.get(FMP_STOCK_NEWS_URL, params=params, timeout=timeout)
-        response.raise_for_status()
-    except requests.HTTPError as e:
-        print(f"WARNING fmp stock news fetch failed: {e}")
-        return []
-    except Exception as e:
-        print(f"WARNING fmp stock news fetch failed: {e}")
+        response = requests.get(url, params=params, timeout=timeout)
+    except requests.RequestException as e:
+        logger.warning("FMP %s network error: %s", label, e)
         return []
 
-    data = response.json()
+    if response.status_code == 402:
+        logger.info("FMP %s unavailable on current plan (HTTP 402) — skipping", label)
+        return []
+    if response.status_code == 401:
+        logger.warning("FMP %s auth failed (HTTP 401) — check FMP_API_KEY", label)
+        return []
+    if response.status_code == 429:
+        logger.warning("FMP %s rate limited (HTTP 429) — skipping", label)
+        return []
+    if not response.ok:
+        logger.warning("FMP %s fetch failed: HTTP %s", label, response.status_code)
+        return []
+
+    try:
+        data = response.json()
+    except ValueError as e:
+        logger.warning("FMP %s returned invalid JSON: %s", label, e)
+        return []
+
     if not isinstance(data, list):
         return []
 
     results: list[dict[str, Any]] = []
     for item in data:
-        normalized = _normalize_fmp_item(item, category="equity")
+        normalized = _normalize_fmp_item(item, category=category)
         if normalized is not None:
             results.append(normalized)
-
     return results
+
+
+def fetch_from_fmp_stock_news(
+    limit: int = 20,
+    timeout: int = 15,
+) -> list[dict[str, Any]]:
+    return _fetch_fmp(FMP_STOCK_NEWS_URL, "stock news", "equity", limit, timeout)
 
 
 def fetch_from_fmp_general_news(
     limit: int = 20,
     timeout: int = 15,
 ) -> list[dict[str, Any]]:
-    try:
-        api_key = _get_api_key()
-    except Exception as e:
-        print(f"WARNING fmp general news skipped: {e}")
-        return []
-
-    params = {
-        "apikey": api_key,
-        "page": 0,
-        "limit": limit,
-    }
-
-    try:
-        response = requests.get(FMP_GENERAL_NEWS_URL, params=params, timeout=timeout)
-        response.raise_for_status()
-    except requests.HTTPError as e:
-        print(f"WARNING fmp general news fetch failed: {e}")
-        return []
-    except Exception as e:
-        print(f"WARNING fmp general news fetch failed: {e}")
-        return []
-
-    data = response.json()
-    if not isinstance(data, list):
-        return []
-
-    results: list[dict[str, Any]] = []
-    for item in data:
-        normalized = _normalize_fmp_item(item, category="general")
-        if normalized is not None:
-            results.append(normalized)
-
-    return results
+    return _fetch_fmp(FMP_GENERAL_NEWS_URL, "general news", "general", limit, timeout)
 
 
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
     stock_news = fetch_from_fmp_stock_news(limit=5)
     general_news = fetch_from_fmp_general_news(limit=5)
 
