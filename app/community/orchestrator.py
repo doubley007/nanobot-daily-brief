@@ -34,7 +34,7 @@ def _disclose_x_failure(exc: Exception) -> str:
         if reason == "CreditsDepleted":
             # Paid plan, credits balance = 0. Very different signal from
             # a tier block — the fix is buying credits, not changing code.
-            return "x=credits-depleted (账户余额为0)"
+            return "x=credits-depleted (account balance is 0)"
         return f"x=plan-blocked (402, {reason})"
     return f"x=error ({type(exc).__name__})"
 
@@ -77,7 +77,7 @@ def run_community_analyst(
 
         if result.trending_topics:
             sentiments.append(result)
-            status_lines.append(f"{name}=ok ({result.post_count}贴, {len(result.trending_topics)}簇)")
+            status_lines.append(f"{name}=ok ({result.post_count} posts, {len(result.trending_topics)} clusters)")
         elif result.post_count == 0:
             if name == "x":
                 status_lines.append("x=unavailable or not configured")
@@ -88,7 +88,7 @@ def run_community_analyst(
             else:
                 status_lines.append(f"{name}=no data")
         else:
-            status_lines.append(f"{name}=filtered out ({result.post_count}贴, 0簇)")
+            status_lines.append(f"{name}=filtered out ({result.post_count} posts, 0 clusters)")
 
     if not sentiments:
         return sentiments, report_stub()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Optional
 
@@ -9,6 +10,8 @@ from news_sources.fmp_source import (
     fetch_from_fmp_general_news,
     fetch_from_fmp_stock_news,
 )
+
+logger = logging.getLogger(__name__)
 
 
 # =========================================================
@@ -29,6 +32,8 @@ class RawNewsItem:
 # Insurance / portfolio relevant keywords
 # =========================================================
 
+# Scored for the Great Eastern SG insurance use case: rates / credit /
+# Asia + SG / insurance-regulation lead; US single-stock equity lags.
 INSURANCE_RELEVANT_KEYWORDS = {
     "fed": 5,
     "federal reserve": 5,
@@ -52,9 +57,20 @@ INSURANCE_RELEVANT_KEYWORDS = {
     "banks": 3,
     "insurer": 4,
     "insurance": 4,
-    "mas": 5,
-    "singapore": 4,
-    "sgd": 4,
+    # Singapore / Asia bias — Great Eastern's actual book
+    "mas": 7,
+    "singapore": 6,
+    "sgd": 6,
+    "sti": 4,
+    "asia": 3,
+    "hong kong": 3,
+    "malaysia": 3,
+    "indonesia": 3,
+    "asean": 4,
+    "great eastern": 6,
+    "ocbc": 4,
+    "dbs": 4,
+    "uob": 4,
     "usd": 3,
     "fx": 3,
     "foreign exchange": 3,
@@ -68,6 +84,14 @@ INSURANCE_RELEVANT_KEYWORDS = {
     "regulation": 4,
     "capital requirement": 5,
     "solvency": 5,
+    # Insurance-book-specific terms
+    "life insurance": 5,
+    "par fund": 5,
+    "participating fund": 5,
+    "with-profits": 4,
+    "annuity": 4,
+    "reinsurance": 4,
+    "policyholder": 3,
     "sanctions": 3,
     "tariff": 3,
 }
@@ -77,19 +101,40 @@ LOW_VALUE_KEYWORDS = {
     "stock moved up": -3,
     "stock moved down": -3,
     "drivers behind the movement": -3,
-    "price target": -2,
-    "buy now": -4,
-    "top stock": -4,
-    "analyst says": -2,
-    "upgrade": -1,
+    "price target": -3,
+    "buy now": -5,
+    "top stock": -5,
+    "analyst says": -3,
+    "analyst upgrade": -3,
+    "analyst downgrade": -3,
+    "upgrade": -2,
     "downgrade to sell": -1,
-    "top pick": -2,
+    "top pick": -3,
     "shares rose": -1,
     "shares fell": -1,
     "etf": -2,
     "valuation": -2,
     "upside": -2,
-    "what investors need to know": -3,
+    "what investors need to know": -4,
+    # Single-stock technical / ratings noise
+    "ai downgrades": -6,
+    "ai downgrade": -6,
+    "ai upgrades": -6,
+    "ai upgrade": -6,
+    "tipranks": -5,
+    "technical pressure": -4,
+    "moving average": -3,
+    "resistance level": -3,
+    "support level": -3,
+    "overbought": -3,
+    "oversold": -3,
+    "short interest": -3,
+    "why is": -3,
+    "why are": -3,
+    "stock surging": -3,
+    "stock jumps": -3,
+    "stock soars": -3,
+    "stock plunges": -3,
 }
 
 NEGATIVE_NOISE_KEYWORDS = {
@@ -108,12 +153,35 @@ NEGATIVE_NOISE_KEYWORDS = {
     "peace talks": -2,
     "diplomatic": -2,
     "statement": -1,
+    # Retail / listicle noise
+    "here's why": -3,
+    "here is why": -3,
+    "5 stocks": -4,
+    "3 stocks": -4,
+    "10 stocks": -4,
+    "these stocks": -3,
+    "dividend stock": -3,
+    "growth stock": -3,
+    "value stock": -3,
+    "penny stock": -4,
+    "retirement": -2,
+    "portfolio builder": -3,
+    "passive income": -3,
+    "how to invest": -4,
+    "warren buffett": -2,
+    "cathie wood": -3,
+    "jim cramer": -3,
+    "motley fool": -3,
+    "zacks rank": -4,
+    "zacks investment": -4,
 }
 
 EXCLUDE_KEYWORDS = [
     "opinion",
     "sponsored",
     "advertisement",
+    "advertorial",
+    "press release",
 ]
 
 PREFERRED_SOURCES = {
@@ -126,6 +194,13 @@ PREFERRED_SOURCES = {
     "MarketWatch": 2,
     "CNBC": 1,
     "Alpha Vantage": 1,
+    # SG / Asia local sources
+    "Business Times SG": 3,
+    "Business Times Banking": 3,
+    "Business Times Economy": 3,
+    "CNA Business": 2,
+    "Straits Times Business": 2,
+    "Finnhub": 1,
 }
 
 REGION_PENALTY_KEYWORDS = {
@@ -157,7 +232,7 @@ def _normalize_item(item: dict) -> Optional[RawNewsItem]:
 
     return RawNewsItem(
         title=title,
-        summary=(item.get("summary") or "暂无摘要").strip(),
+        summary=(item.get("summary") or "no summary available").strip(),
         source=(item.get("source") or "Unknown").strip(),
         category=(item.get("category") or "general").strip(),
         url=item.get("url"),
@@ -168,6 +243,85 @@ def _normalize_item(item: dict) -> Optional[RawNewsItem]:
 def _is_excluded(item: RawNewsItem) -> bool:
     text = f"{item.title} {item.summary}".lower()
     return any(keyword in text for keyword in EXCLUDE_KEYWORDS)
+
+
+# =========================================================
+# Headline ↔ body directional consistency check
+# =========================================================
+#
+# Goal: drop items whose headline and summary clearly disagree on the
+# direction of the story (e.g. "surging" in the title, "slumped" in the
+# body). This is a lightweight guard — we only catch unambiguous
+# conflicts and leave nuanced cases to downstream ranking.
+
+_POSITIVE_DIRECTION_WORDS = {
+    "surge", "surges", "surging", "surged",
+    "rally", "rallies", "rallying", "rallied",
+    "jump", "jumps", "jumped", "jumping",
+    "soar", "soars", "soaring", "soared",
+    "gain", "gains", "gaining", "gained",
+    "climb", "climbs", "climbing", "climbed",
+    "rise", "rises", "rising", "rose",
+    "up", "upbeat", "higher",
+    "beat", "beats", "beating",
+    "boost", "boosts", "boosted",
+    "outperform", "outperforms", "outperformed",
+}
+
+_NEGATIVE_DIRECTION_WORDS = {
+    "fall", "falls", "falling", "fell",
+    "drop", "drops", "dropping", "dropped",
+    "plunge", "plunges", "plunging", "plunged",
+    "sink", "sinks", "sinking", "sank", "sunk",
+    "slump", "slumps", "slumping", "slumped",
+    "tumble", "tumbles", "tumbling", "tumbled",
+    "slide", "slides", "sliding", "slid",
+    "crash", "crashes", "crashing", "crashed",
+    "decline", "declines", "declining", "declined",
+    "lower", "downbeat",
+    "miss", "misses", "missed",
+    "cut", "cuts", "cutting",
+    "weaken", "weakens", "weakened", "weakening",
+    "underperform", "underperforms", "underperformed",
+}
+
+
+def _tokens(text: str) -> set[str]:
+    cleaned = []
+    for ch in text.lower():
+        cleaned.append(ch if ch.isalnum() else " ")
+    return set("".join(cleaned).split())
+
+
+def _direction_of(tokens: set[str]) -> str:
+    has_pos = bool(tokens & _POSITIVE_DIRECTION_WORDS)
+    has_neg = bool(tokens & _NEGATIVE_DIRECTION_WORDS)
+    if has_pos and not has_neg:
+        return "up"
+    if has_neg and not has_pos:
+        return "down"
+    if has_pos and has_neg:
+        return "mixed"
+    return "none"
+
+
+def _has_headline_body_conflict(item: RawNewsItem) -> bool:
+    """
+    Return True when the headline clearly says one direction but the
+    summary/body clearly says the opposite. Mixed-signal cases don't
+    trip the filter — we only flag clean up-vs-down conflicts.
+    """
+    title_dir = _direction_of(_tokens(item.title))
+    body = item.summary or ""
+    if not body or body == "no summary available":
+        return False
+    body_dir = _direction_of(_tokens(body))
+
+    if title_dir == "up" and body_dir == "down":
+        return True
+    if title_dir == "down" and body_dir == "up":
+        return True
+    return False
 
 
 def _is_market_relevant_equity_story(item: RawNewsItem) -> bool:
@@ -215,6 +369,58 @@ def _is_low_value_single_stock_story(item: RawNewsItem) -> bool:
         "is its",
         "a high-wire act",
         "the real test amid rising risks",
+        # ADR / ticker single-stock format: "Company (ADR)", "Company stock (TICKER):"
+        "(adr)",
+        "stock (br",   # Brazilian ADR tickers e.g. BRGGBRACNPR7
+        "stock (us",
+        "stock (hk",
+        "stock (sg",
+        # "Why X weigh on shares / stock" — classic single-stock explanation
+        "weigh on shares",
+        "weigh on stock",
+        "weighs on shares",
+        "weighs on stock",
+        "faces headwinds from",
+        "stock faces headwinds",
+        "faces uncertainty amid",
+        "stock faces uncertainty",
+        # Single-stock ratings/technical noise
+        "ai downgrades",
+        "ai downgrade",
+        "ai upgrades",
+        "ai upgrade",
+        "technical pressure offsets",
+        "solid fundamentals",
+        "strong fundamentals",
+        "why is ",
+        "why are ",
+        "why does ",
+        "why did ",
+        "why this",
+        "why that",
+        "tipranks",
+        "moving average",
+        "moving averages",
+        "resistance level",
+        "support level",
+        "key resistance",
+        "key support",
+        "relative strength",
+        "overbought",
+        "oversold",
+        "price target",
+        "stock picks",
+        "top picks",
+        "stock to buy",
+        "stock to watch",
+        "stock to own",
+        "best stock",
+        "worst stock",
+        "analyst downgrade",
+        "analyst upgrade",
+        "raises price target",
+        "cuts price target",
+        "short interest",
     ]
     if any(p in title_lower for p in hard_reject_title_patterns):
         return True
@@ -288,6 +494,25 @@ def _is_low_value_single_stock_story(item: RawNewsItem) -> bool:
         "refinancing",
         "sanctions",
         "spread widening",
+        # GE / OCBC group / SG insurance competitors — never drop these
+        "great eastern",
+        "ocbc",
+        "oversea-chinese banking",
+        "prudential singapore",
+        "aia singapore",
+        "income insurance",
+        "ntuc income",
+        "singlife",
+        "aviva singapore",
+        "manulife singapore",
+        "tokio marine singapore",
+        "fwd singapore",
+        "medical inflation",
+        "bancassurance",
+        "rbc 2",
+        "rbc2",
+        "integrated shield",
+        "par fund",
     ]
 
     if any(k in text for k in protected_keywords):
@@ -314,6 +539,36 @@ def _is_low_value_single_stock_story(item: RawNewsItem) -> bool:
 
 def detect_portfolio_impact_bucket(item: RawNewsItem) -> str:
     text = f"{item.title} {item.summary}".lower()
+
+    # TIER-1: GE / OCBC group / direct SG insurance competitors — highest priority
+    # Must be checked first so "Great Eastern Q1 profit" doesn't get routed into
+    # macro/general buckets by incidental keyword matches.
+    if any(
+        k in text
+        for k in [
+            "great eastern",
+            "ocbc group",
+            "ocbc wealth",
+            "ocbc insurance",
+            "oversea-chinese banking",
+            "prudential singapore",
+            "prudential assurance",
+            "aia singapore",
+            "income insurance",
+            "ntuc income",
+            "singlife",
+            "aviva singapore",
+            "manulife singapore",
+            "tokio marine singapore",
+            "fwd singapore",
+            "life insurance association",
+            "integrated shield",
+            "mas insurance",
+            "rbc 2",
+            "rbc2",
+        ]
+    ):
+        return "singapore_insurer"
 
     if any(
         k in text
@@ -503,19 +758,30 @@ def _deduplicate_exact(items: list[RawNewsItem]) -> list[RawNewsItem]:
     return results
 
 
-def _deduplicate_by_topic(items: list[RawNewsItem]) -> list[RawNewsItem]:
-    best_by_topic: dict[str, RawNewsItem] = {}
+def _deduplicate_by_topic(
+    items: list[RawNewsItem],
+    max_per_topic: int = 8,
+) -> list[RawNewsItem]:
+    """
+    Keep the top-scoring items per topic (sorted by score DESC).
+    max_per_topic=8 gives the RAG store enough coverage per topic while
+    still culling obvious duplicates.  The original behaviour (keep 1) is
+    preserved for the brief's select_diverse_by_bucket step which runs
+    after this and enforces its own diversity limit.
+    """
+    from collections import defaultdict
+    by_topic: dict[str, list[RawNewsItem]] = defaultdict(list)
 
     for item in items:
         topic = _detect_topic(item)
-        if topic not in best_by_topic:
-            best_by_topic[topic] = item
-            continue
+        by_topic[topic].append(item)
 
-        if _score_item(item) > _score_item(best_by_topic[topic]):
-            best_by_topic[topic] = item
+    results: list[RawNewsItem] = []
+    for topic_items in by_topic.values():
+        topic_items.sort(key=_score_item, reverse=True)
+        results.extend(topic_items[:max_per_topic])
 
-    return list(best_by_topic.values())
+    return results
 
 
 # =========================================================
@@ -586,17 +852,19 @@ def fetch_financial_news(
     score → select by portfolio impact bucket diversity.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from news_sources.rss_source import fetch_from_rss
 
     sources = {
         "finnhub": lambda: fetch_from_finnhub(limit=20, timeout=timeout),
         "fmp_stock": lambda: fetch_from_fmp_stock_news(limit=20, timeout=timeout),
         "fmp_general": lambda: fetch_from_fmp_general_news(limit=20, timeout=timeout),
         "alpha_vantage": lambda: fetch_from_alpha_vantage(limit=20, timeout=timeout),
+        "rss": lambda: fetch_from_rss(limit=120, timeout=timeout),
     }
 
     raw_dict_items: list[dict] = []
 
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         future_to_name = {pool.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_to_name):
             name = future_to_name[future]
@@ -609,6 +877,7 @@ def fetch_financial_news(
         return []
 
     normalized_items: list[RawNewsItem] = []
+    conflict_filtered = 0
     for item in raw_dict_items:
         normalized = _normalize_item(item)
         if normalized is None:
@@ -617,7 +886,27 @@ def fetch_financial_news(
             continue
         if _is_low_value_single_stock_story(normalized):
             continue
+        if _has_headline_body_conflict(normalized):
+            conflict_filtered += 1
+            logger.info(
+                "news_fetcher: dropping headline/body-inconsistent item — title=%r",
+                normalized.title,
+            )
+            continue
         normalized_items.append(normalized)
+
+    if conflict_filtered:
+        # Mirror the module-level print pattern used for fetch warnings
+        # so the count shows up in daily_job stdout/log, not only in the
+        # file-logger.
+        print(
+            f"INFO news_fetcher: headline/body consistency filter dropped "
+            f"{conflict_filtered} item(s)"
+        )
+        logger.info(
+            "news_fetcher: headline/body consistency filter dropped %d item(s)",
+            conflict_filtered,
+        )
 
     if not normalized_items:
         return []

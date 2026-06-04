@@ -9,10 +9,10 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Provider selection. "ollama" (default, local dev) or "deepseek" (CI / remote).
+# Provider selection: "ollama" (default, local) or "deepseek" (remote).
 LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()
 
-# Ollama (local)
+# Ollama (local, OpenAI-compatible)
 OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1").rstrip("/")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5:3b-instruct")
 OLLAMA_API_KEY = os.getenv("OLLAMA_API_KEY", "dummy")
@@ -24,9 +24,10 @@ DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
 
 _SYSTEM_PROMPT = (
-    "你是一个金融日报编辑。"
-    "你必须输出合法 JSON，且只输出 JSON。"
-    "不要输出 markdown，不要输出额外解释。"
+    "You are the editor of a financial daily brief. "
+    "Respond in English. "
+    "You MUST output valid JSON and ONLY JSON. "
+    "No markdown, no additional explanation."
 )
 
 
@@ -77,19 +78,40 @@ def local_llm_callable(prompt: str, timeout: int = 60) -> str:
         return content
 
 
+def local_llm_plain(prompt: str, timeout: int = 60) -> str:
+    """Free-text generation — no JSON mode, no JSON system prompt. Use for reply rewrites."""
+    base, model, api_key = _active_provider_config()
+    url = f"{base}/chat/completions"
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    payload: dict[str, Any] = {
+        "model": model,
+        "temperature": 0.35,
+        "messages": [
+            {"role": "system", "content": "You are a professional market-analysis assistant. Reply in clear, natural English with the answer directly (no preamble)."},
+            {"role": "user", "content": prompt},
+        ],
+    }
+    response = requests.post(url, headers=headers, json=payload, timeout=timeout)
+    response.raise_for_status()
+    data = response.json()
+    return data["choices"][0]["message"]["content"].strip()
+
+
 def check_llm_available() -> bool:
     """
-    Provider-aware health check. Replaces the old localhost-only Ollama ping.
-    - ollama: GET the base host root
-    - deepseek (or any remote): presence of API key is enough; skip a network
-      probe so we don't burn a request on every preflight.
+    Provider-aware health check.
+    - deepseek: presence of API key is enough; skip network probe.
+    - ollama: GET /api/tags (Ollama's native listing endpoint).
     """
     if LLM_PROVIDER == "deepseek":
         return bool(DEEPSEEK_API_KEY)
 
     try:
-        health_url = OLLAMA_API_BASE.replace("/v1", "")
-        resp = requests.get(health_url, timeout=5)
+        tags_url = OLLAMA_API_BASE.replace("/v1", "") + "/api/tags"
+        resp = requests.get(tags_url, timeout=5)
         return resp.status_code == 200
     except Exception:
         return False

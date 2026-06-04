@@ -3,9 +3,9 @@ Topic clustering for unified community posts.
 
 Two strategies, picked at runtime:
 
-  1. Embedding-based (preferred). Uses the Ollama embeddings endpoint with
-     a small local model. Groups posts by cosine similarity with an
-     agglomerative single-link threshold. Produces finer, event-level
+  1. Embedding-based (preferred). Uses Ollama /api/embeddings with
+     nomic-embed-text. Groups posts by cosine similarity with an
+     agglomerative average-link threshold. Produces finer, event-level
      clusters than keyword bucketing.
 
   2. Keyword-fallback. Reuses community.analysis.classify_post when
@@ -34,15 +34,16 @@ from community.schema import TopicCluster, TrendProfile, UnifiedPost
 logger = logging.getLogger(__name__)
 
 
-# ─── Embeddings (Ollama native endpoint, lightweight) ────────────────────────
+# ─── Embeddings (Ollama native endpoint) ─────────────────────────────────────
+# Chat/LLM and embeddings both go through Ollama on port 11434.
 
 OLLAMA_API_BASE = os.getenv("OLLAMA_API_BASE", "http://localhost:11434/v1").rstrip("/")
 OLLAMA_EMBED_MODEL = os.getenv("OLLAMA_EMBED_MODEL", "nomic-embed-text")
+
 EMBED_TIMEOUT = 20
-# Average-link threshold on nomic-embed-text. Calibrated empirically on the
-# Reddit hot feed: 0.70 produces 3-5 event-level clusters of 2-4 posts each
-# (oil+hormuz, yuan-pricing, portfolio-advice, etc.). Single-link chained
-# unrelated posts at this threshold; average-link is the reason it's safe.
+# Average-link threshold calibrated empirically: 0.70 produces 3-5 event-level
+# clusters of 2-4 posts each. Single-link chains unrelated posts at this
+# threshold; average-link is the reason it's safe.
 SIMILARITY_THRESHOLD = float(os.getenv("COMMUNITY_CLUSTER_THRESHOLD", "0.70"))
 
 
@@ -64,9 +65,8 @@ def _warn_embed_fallback_once(reason: str) -> None:
 
 def _embed_batch(texts: list[str]) -> list[list[float]] | None:
     """
-    Call Ollama's native /api/embeddings. Returns None on any failure so
-    callers can cleanly fall back to keyword clustering. Warns loudly
-    exactly once per process so logs don't drown in per-post retries.
+    POST to Ollama /api/embeddings. Returns None on any failure so callers
+    fall back to keyword clustering. Warns once per process.
     """
     if not texts:
         return []

@@ -60,7 +60,7 @@ def _clean_raw_text(text: str) -> str:
 
 def fallback_happened(item: NewsItem) -> str:
     """
-    Rule-based rewrite of 'what happened' in Chinese.
+    Rule-based rewrite of 'what happened'.
     Make it closer to the actual news content, not just generic category text.
     """
     text = f"{item.title} {item.summary}".lower()
@@ -69,59 +69,59 @@ def fallback_happened(item: NewsItem) -> str:
 
     # Fed / rate cut expectation
     if any(k in text for k in ["fed rate cut", "rate cut bets", "rate cuts"]):
-        return "市场对美联储年内降息的预期有所回升，利率期货定价开始朝更宽松的方向调整。"
+        return "Market pricing for Fed rate cuts this year has firmed; rate-futures curves are shifting toward a more dovish path."
 
     # Treasury / yields
     if any(k in text for k in ["treasury", "yield", "yields", "bond"]):
-        return "美债收益率出现波动，反映市场正在重新评估未来通胀和利率走势。"
+        return "Treasury yields are moving, reflecting a market reassessment of the inflation and rate path."
 
     # Inflation
     if any(k in text for k in ["cpi", "inflation"]):
-        return "通胀相关预期出现变化，市场开始重新调整对价格压力和政策路径的判断。"
+        return "Inflation expectations are shifting; investors are recalibrating their read on price pressure and policy."
 
     # Employment
     if any(k in text for k in ["payroll", "employment", "labor"]):
-        return "就业市场信号出现变化，投资者正在重新评估经济韧性和政策节奏。"
+        return "Labour-market signals have shifted; investors are reassessing economic resilience and policy tempo."
 
     # India / New Zealand / regional central banks
     if "india" in text and "holds rates" in text:
-        return "印度央行维持利率不变，同时提示地缘局势可能加大增长和通胀的不确定性。"
+        return "The RBI held rates, flagging that geopolitical developments could amplify growth and inflation uncertainty."
 
     if "new zealand" in text and "holds rates" in text:
-        return "新西兰央行维持利率不变，并警告若地缘冲突推升通胀，后续可能采取更强硬行动。"
+        return "The RBNZ held rates and warned it could act more forcefully if geopolitical shocks push inflation higher."
 
     # Central bank generic
     if any(k in text for k in ["federal reserve", "central bank", "interest rate", "rates"]):
-        return "央行政策相关信号出现新变化，市场正在重新评估后续利率路径。"
+        return "Central-bank signals have shifted; the market is repricing the forward rate path."
 
     # Credit risk
     if any(k in text for k in ["default", "downgrade", "credit", "liquidity", "spread"]):
-        return "信用风险相关事件出现新进展，市场开始关注其对融资环境和风险偏好的影响。"
+        return "A new credit-risk development is in focus; attention turns to its impact on funding conditions and risk appetite."
 
     # Bank profits / outlook
     if any(k in text for k in ["bank profits", "bank profit", "lender", "lenders"]):
-        return "银行业盈利前景获得部分支撑，但地缘风险仍让市场对后续表现保持谨慎。"
+        return "Bank earnings find partial support, though geopolitical risk keeps the market cautious on the outlook."
 
     # Earnings / guidance
     if any(k in text for k in ["earnings", "guidance", "revenue", "profit", "forecast"]):
-        return "公司业绩或管理层指引出现新信息，市场正在重新评估其盈利前景。"
+        return "New earnings or guidance information has arrived; the market is reassessing the profit trajectory."
 
     # Singapore
     if any(k in text for k in ["mas", "singapore"]):
-        return "新加坡或本地区金融环境出现新信号，值得关注其对本地市场的影响。"
+        return "A new signal from Singapore's financial environment is worth tracking for local-market impact."
 
     # Insurance
     if any(k in text for k in ["insurer", "insurance"]):
-        return "保险行业出现新的经营或政策信号，可能影响长期资金配置与行业预期。"
+        return "New operating or policy signals in the insurance industry — relevant for long-duration capital allocation and sector expectations."
 
     # Commodities
     if any(k in text for k in ["gold", "oil", "commodity", "commodities"]):
-        return "大宗商品价格出现新变化，市场正在评估其对通胀预期和风险情绪的影响。"
-    
-    if any(k in text for k in ["peace", "ceasefire", "diplomatic", "iran war", "middle east"]):
-        return "地缘局势相关表态出现新进展，市场正在评估其对风险情绪和资产定价的影响。"
+        return "Commodity prices are moving; the market is assessing the pass-through to inflation expectations and risk sentiment."
 
-    if raw_summary and raw_summary != "暂无摘要":
+    if any(k in text for k in ["peace", "ceasefire", "diplomatic", "iran war", "middle east"]):
+        return "New geopolitical developments; the market is assessing the impact on risk sentiment and asset pricing."
+
+    if raw_summary and raw_summary != "no summary available":
         return raw_summary[:120]
 
     return raw_title[:120]
@@ -131,15 +131,15 @@ def fallback_why(item: NewsItem) -> str:
     news_type = detect_news_type(item)
 
     mapping = {
-        "macro_rates": "这会直接影响固定收益组合估值和再投资收益率，也会影响久期配置判断。",
-        "treasury_rates": "收益率变化会影响债券价格、贴现率和大类资产配置方向。",
-        "credit_risk": "这会影响信用利差判断、企业债风险评估，以及相关减值压力。",
-        "earnings": "这有助于判断相关板块和风险资产表现，但除非具有行业外溢性，对整体组合影响相对有限。",
-        "singapore": "这对新加坡本地资产配置、外汇换算和区域市场判断更有直接参考意义。",
-        "banking": "银行业变化会影响信用环境、流动性预期以及金融板块配置。",
-        "insurance": "保险行业相关信号有助于判断利率敏感性、长期资金配置和行业风险。",
-        "commodities": "大宗商品价格变化可能通过通胀预期传导至利率、信用和风险资产表现。",
-        "general": "这条信息有助于判断当天组合风险偏好和市场主线变化。",
+        "macro_rates": "Direct bearing on fixed-income valuations and reinvestment yields, plus duration positioning.",
+        "treasury_rates": "Yield moves feed through to bond pricing, discount rates, and cross-asset allocation.",
+        "credit_risk": "Affects credit-spread view, corporate-bond risk assessment, and associated impairment pressure.",
+        "earnings": "Useful for reading the related sector and risk assets, but without industry spillover the portfolio impact is limited.",
+        "singapore": "Direct relevance to SG-local allocation, FX translation, and regional market reads.",
+        "banking": "Bank-sector moves shape credit conditions, liquidity expectations, and financials positioning.",
+        "insurance": "Insurance-sector signals feed into rate sensitivity, long-duration allocation, and industry risk reads.",
+        "commodities": "Commodity moves can transmit through inflation expectations into rates, credit, and risk assets.",
+        "general": "Helpful for reading today's portfolio risk appetite and the dominant market theme.",
     }
 
     return mapping.get(news_type, mapping["general"])
@@ -153,24 +153,24 @@ def enrich_news_item_with_fallback(item: NewsItem) -> NewsItem:
 
 def build_news_enrichment_prompt(item: NewsItem) -> str:
     return f"""
-你是一个服务于新加坡保险投资团队的金融日报编辑。请基于下面的新闻，输出一个 JSON，对新闻做简洁、专业、非空话的中文解释。
+You are the editor of a daily financial brief for a Singapore insurance investment team. Given the news below, return a JSON object with a concise, professional, non-fluff explanation. Respond in English.
 
-要求：
-1. 用中文输出
-2. 不要照抄原文标题
-3. "happened" 用一句话解释“发生了什么”
-4. "why" 用一句话解释“对组合影响”
-5. 不要写空话，如“值得关注”“可能产生影响”这类泛话，除非说明具体影响方向
-6. 优先从固定收益、信用、外汇流动性、新加坡本地、房地产贷款、私募股权、监管影响来解释
-7. 输出必须是 JSON，格式如下：
+Requirements:
+1. Respond in English.
+2. Do not copy the original headline verbatim.
+3. "happened" — one sentence explaining what happened.
+4. "why" — one sentence on the portfolio impact.
+5. No empty phrases ("worth watching", "could have an impact"). Always point to a specific transmission channel or direction.
+6. Preferred lenses: fixed income, credit, FX / liquidity, Singapore-local, real-estate / loans, private equity, regulatory impact.
+7. Output must be valid JSON of the form:
 {{
   "happened": "...",
   "why": "..."
 }}
 
-新闻标题：{item.title}
-新闻摘要：{item.summary}
-新闻来源：{item.source}
+News title: {item.title}
+News summary: {item.summary}
+News source: {item.source}
 """.strip()
 
 

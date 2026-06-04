@@ -118,8 +118,8 @@ def classify_post(title: str) -> tuple[str, int]:
 
 
 SENTIMENT_LABELS_CN = {
-    "bullish": "偏多",
-    "bearish": "偏空",
-    "neutral": "中性",
-    "mixed": "分歧",
+    "bullish": "bullish",
+    "bearish": "bearish",
+    "neutral": "neutral",
+    "mixed": "mixed",
 }

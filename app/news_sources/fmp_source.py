@@ -27,7 +27,7 @@ def _normalize_fmp_item(item: dict[str, Any], category: str) -> dict[str, Any] |
     if not title:
         return None
 
-    summary = (item.get("text") or item.get("summary") or "").strip() or "暂无摘要"
+    summary = (item.get("text") or item.get("summary") or "").strip() or "no summary available"
     source = (item.get("site") or item.get("source") or "Unknown").strip()
     url = item.get("url")
     published_at = item.get("publishedDate") or item.get("date")

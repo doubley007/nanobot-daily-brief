@@ -43,11 +43,11 @@ CATEGORY_EMOJI = {
 }
 
 CATEGORY_LABEL_CN = {
-    "sg_property": "新加坡房地产",
-    "rates_macro": "利率/宏观",
-    "equities": "美股/港股/新加坡",
-    "event": "关键事件",
-    "general": "综合",
+    "sg_property": "SG Property",
+    "rates_macro": "Rates / Macro",
+    "equities": "US / HK / SG Equities",
+    "event": "Key Event",
+    "general": "General",
 }
 
 
@@ -82,7 +82,7 @@ def format_item(item: FeedItem) -> str:
         lines.append(item.summary)
 
     if item.why_it_matters:
-        lines.append(f"> 为何重要：{item.why_it_matters}")
+        lines.append(f"> Why it matters: {item.why_it_matters}")
 
     footer_parts: list[str] = []
     if item.source:
@@ -305,7 +305,7 @@ def _community_to_feed_items() -> list[FeedItem]:
         if category is None:
             continue
         items.append(FeedItem(
-            title=f"社区热议：{headline}",
+            title=f"Community buzz: {headline}",
             category=category,
             summary=t.discussion_focus or "",
             why_it_matters=t.market_relevance or t.insurance_angle or "",
@@ -317,7 +317,185 @@ def _community_to_feed_items() -> list[FeedItem]:
 
 def build_real_items(news_limit: int = 10) -> list[FeedItem]:
     """Assemble today's real-source feed: news first, then community."""
-    return _news_to_feed_items(limit=news_limit) + _community_to_feed_items()
+    return (
+        _news_to_feed_items(limit=news_limit)
+        + _community_to_feed_items()
+        + _polymarket_to_feed_items()
+    )
+
+
+# ─── Polymarket prediction-market source ─────────────────────────────────────
+#
+# Polymarket's public Gamma API needs no auth. We pull the top-volume active
+# markets and keep only ones that (a) touch our SG-insurer priority themes,
+# (b) carry real uncertainty (price in 0.05-0.95). Celebrity/novelty
+# questions at 0.99/0.01 add no signal even when they pass keyword filters.
+
+_POLYMARKET_ENDPOINT = "https://gamma-api.polymarket.com/markets"
+_POLYMARKET_TIMEOUT = 15
+_POLYMARKET_LIMIT = 300
+
+_PM_KEYWORDS_MACRO = (
+    "fed", "interest rate", "rate cut", "rate hike", "cpi", "inflation",
+    "recession", "gdp", "treasury", "yield", "fomc", "jerome powell", "powell",
+)
+_PM_KEYWORDS_GEO = (
+    "iran", "russia", "ukraine", "israel", "tariff", "china", "hong kong",
+    "taiwan",
+)
+_PM_KEYWORDS_SG = ("singapore", "sgd", "mas ")
+_PM_KEYWORDS_COMMOD = ("oil", "opec", "brent", "crude", "wti")
+_PM_KEYWORDS_BANK = (
+    "bank failure", "credit spread", "regional bank", "bank run",
+)
+_PM_ALL_KEYWORDS = (
+    _PM_KEYWORDS_MACRO + _PM_KEYWORDS_GEO + _PM_KEYWORDS_SG
+    + _PM_KEYWORDS_COMMOD + _PM_KEYWORDS_BANK
+)
+
+# Reject generic politics/celebrity/novelty markets. Polymarket's top volume
+# is dominated by 2028 celebrity-election questions that mean nothing for a
+# SG insurer; blacklisting specific names stays maintainable.
+_PM_REJECT_KEYWORDS = (
+    "2028", "kardashian", "lebron", "oprah", "mrbeast", "beto", "clinton",
+    "bernie", "pence", "walz", "phil murphy", "ramaswamy", "gabbard",
+    "vivek", "greg abbott", "cheney", "stephen smith", "tulsi", "clooney",
+    "pope", "mars", "gta vi", "taylor swift", "nba champion", "super bowl",
+    "oscar", "grammy", "eurovision",
+)
+
+_PM_UNCERTAINTY_MIN = 0.05
+_PM_UNCERTAINTY_MAX = 0.95
+_PM_MAX_ITEMS = 5  # cap so the feed doesn't drown the daily brief
+
+
+def _pm_categorize(question: str) -> str:
+    """Map a Polymarket question to a feed category."""
+    q = question.lower()
+    if any(k in q for k in _PM_KEYWORDS_SG):
+        return "sg_property"
+    if any(k in q for k in _PM_KEYWORDS_MACRO):
+        return "rates_macro"
+    # Geopolitics and oil both show up as "event" — they're not directly
+    # rates/macro but they drive risk premia and commodity channels.
+    return "event"
+
+
+def _pm_uncertain(outcome_prices) -> bool:
+    """True when the YES price is in the uncertainty band."""
+    if not outcome_prices:
+        return False
+    try:
+        import json as _json
+        prices = (
+            _json.loads(outcome_prices)
+            if isinstance(outcome_prices, str)
+            else outcome_prices
+        )
+        if not prices:
+            return False
+        yes_price = float(prices[0])
+    except (ValueError, TypeError):
+        return False
+    return _PM_UNCERTAINTY_MIN <= yes_price <= _PM_UNCERTAINTY_MAX
+
+
+def _pm_format_summary(market: dict) -> str:
+    """One-line market summary with YES price + volume + end date."""
+    import json as _json
+    try:
+        prices = _json.loads(market.get("outcomePrices") or "[]")
+        yes = float(prices[0]) if prices else None
+    except (ValueError, TypeError):
+        yes = None
+
+    volume = float(market.get("volume") or 0)
+    end_date = (market.get("endDate") or "")[:10]
+
+    bits: list[str] = []
+    if yes is not None:
+        bits.append(f"YES implied prob {yes * 100:.0f}%")
+    if volume:
+        bits.append(f"volume ${volume / 1_000_000:.1f}M")
+    if end_date:
+        bits.append(f"ends {end_date}")
+    return " · ".join(bits)
+
+
+def _fetch_polymarket_markets() -> list[dict]:
+    """Fetch top-volume active markets from Polymarket Gamma."""
+    import requests
+
+    try:
+        resp = requests.get(
+            _POLYMARKET_ENDPOINT,
+            params={
+                "limit": _POLYMARKET_LIMIT,
+                "active": "true",
+                "closed": "false",
+                "order": "volumeNum",
+                "ascending": "false",
+            },
+            timeout=_POLYMARKET_TIMEOUT,
+        )
+        resp.raise_for_status()
+        return resp.json() or []
+    except Exception as e:
+        logger.warning("Polymarket fetch failed: %s", e)
+        return []
+
+
+def _polymarket_to_feed_items() -> list[FeedItem]:
+    """Convert Polymarket's top macro/geo markets into FeedItems."""
+    markets = _fetch_polymarket_markets()
+    if not markets:
+        return []
+
+    items: list[FeedItem] = []
+    for m in markets:
+        question = (m.get("question") or "").strip()
+        if not question:
+            continue
+        q_lower = question.lower()
+        if any(r in q_lower for r in _PM_REJECT_KEYWORDS):
+            continue
+        if not any(k in q_lower for k in _PM_ALL_KEYWORDS):
+            continue
+        if not _pm_uncertain(m.get("outcomePrices")):
+            continue
+
+        category = _pm_categorize(question)
+        summary = _pm_format_summary(m)
+
+        # Why-it-matters is a short insurer-facing take. We don't call LLM
+        # here — the brief's community analyst will interpret this item
+        # once it lands on the Discord channel.
+        why_parts = []
+        if category == "rates_macro":
+            why_parts.append("A shift in rates / macro-path probabilities feeds directly into fixed-income reinvestment yields.")
+        elif category == "event":
+            why_parts.append("Geopolitical / commodity event probabilities shift risk premia and commodity exposure.")
+        elif category == "sg_property":
+            why_parts.append("Direct bearing on local property / SG market exposure.")
+        why = " · ".join(why_parts)
+
+        slug = m.get("slug") or ""
+        url = f"https://polymarket.com/market/{slug}" if slug else ""
+
+        items.append(FeedItem(
+            title=question,
+            category=category,
+            summary=summary,
+            why_it_matters=why,
+            source="Polymarket",
+            url=url,
+            tags=["polymarket", category],
+        ))
+
+        if len(items) >= _PM_MAX_ITEMS:
+            break
+
+    return items
 
 
 # ─── Mock batch (Step 2, kept for smoke-testing) ─────────────────────────────
@@ -329,52 +507,53 @@ def _mock_items() -> list[FeedItem]:
             title="URA Q1 private home price index preview",
             category="sg_property",
             summary=(
-                "市场普遍预期 Q1 私宅价格环比持平至微升 0.3%，"
-                "CCR 高端项目和 OCR 新盘入市节奏是主要看点。"
+                "Street consensus expects Q1 private home prices flat to +0.3% QoQ; "
+                "CCR luxury launches and OCR new-launch pipeline are the key swing factors."
             ),
             why_it_matters=(
-                "若读数超预期，MAS 可能延续宏观审慎措施；保险组合中 "
-                "REITs 板块对此最敏感。"
+                "An upside surprise could keep MAS macroprudential measures in place; "
+                "within the insurance book, REITs are the most sensitive sleeve."
             ),
             source="URA / Street estimates",
             tags=["SG", "property", "REITs"],
         ),
         FeedItem(
-            title="10Y UST yield 维持在 4.25% 附近",
+            title="10Y UST yield holding near 4.25%",
             category="rates_macro",
             summary=(
-                "美债收益率本周窄幅波动，市场继续消化 FOMC 纪要偏鸽信号；"
-                "SOFR 曲线隐含 2026 年内仍有 2 次降息。"
+                "Treasury yields are range-bound this week as the market digests dovish FOMC-minutes signals; "
+                "the SOFR curve still prices 2 cuts by end-2026."
             ),
             why_it_matters=(
-                "长端利率若跌破 4.10%，寿险产品再投资收益率承压；若上破 4.45%，"
-                "REITs 和成长股首当其冲。"
+                "A break below 4.10% at the long end pressures life-product reinvestment yields; "
+                "a break above 4.45% hits REITs and growth equities first."
             ),
             source="Bloomberg / CME FedWatch",
             tags=["rates", "UST", "macro"],
         ),
         FeedItem(
-            title="STI 年初至今跑赢 HSI 约 400bp",
+            title="STI YTD outperforming HSI by ~400bp",
             category="equities",
             summary=(
-                "新加坡本地银行（DBS/OCBC/UOB）在高息差环境下继续贡献指数，"
-                "港股则受科网板块拖累。"
+                "SG local banks (DBS/OCBC/UOB) keep contributing to the index in a higher-NIM regime; "
+                "HK equities are weighed down by tech/internet names."
             ),
             why_it_matters=(
-                "本地三大行占 STI 权重约 45%，利率曲线走势决定后续是否还能跑赢。"
+                "The three SG banks are roughly 45% of STI weight — the rate-curve trajectory decides whether the outperformance continues."
             ),
             source="SGX / HKEX",
             tags=["STI", "HSI", "banks"],
         ),
         FeedItem(
-            title=f"本周关键数据窗口 ({today})",
+            title=f"Key data window this week ({today})",
             category="event",
             summary=(
-                "周三：美国 CPI；周四：MAS 半年度货币政策声明；周五："
-                "新加坡 Q1 GDP 预估值。"
+                "Wed: US CPI. Thu: MAS semi-annual monetary policy statement. "
+                "Fri: Singapore Q1 GDP advance estimate."
             ),
             why_it_matters=(
-                "三天内会连续重定价利率+汇率预期，适合提前梳理组合的利率/汇率敞口。"
+                "Three back-to-back data points that will re-price rates and FX expectations — "
+                "worth lining up the book's rate / FX exposures ahead of time."
             ),
             tags=["calendar", "SG", "US"],
         ),

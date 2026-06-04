@@ -18,6 +18,7 @@ class MarketSnapshot:
     us_equities: Optional[str] = None
     rates: Optional[str] = None
     asia_sg: Optional[str] = None
+    singapore_extended: Optional[str] = None  # SGD/USD, SG bond yield, DBS/OCBC/UOB
 
 
 @dataclass
@@ -30,6 +31,12 @@ class NewsItem:
     why_it_matters: str = ""
     url: Optional[str] = None
     published_at: Optional[str] = None
+    # portfolio_relevance controls how the "影响" line is rendered.
+    # "macro"   — rates / credit / real estate / insurance allocation signal
+    # "sector"  — sector-level event, some spillover
+    # "low"     — single-stock or low-relevance item, don't force a
+    #             portfolio-impact framing
+    portfolio_relevance: str = "macro"
 
 
 @dataclass
@@ -160,6 +167,126 @@ def deduplicate_news_items(items: List[NewsItem]) -> List[NewsItem]:
     return unique_items
 
 
+_MACRO_RELEVANCE_KEYWORDS = {
+    # macro / rates
+    "fed", "federal reserve", "fomc", "rate cut", "rate cuts", "rate hike",
+    "interest rate", "interest rates", "central bank",
+    "treasury", "yield", "yields", "bond", "bonds", "10y", "10-year",
+    "cpi", "inflation", "pce", "payroll", "payrolls", "unemployment",
+    "recession", "gdp",
+    # credit / funding
+    "credit", "spread", "spreads", "liquidity", "default", "downgrade",
+    "refinancing", "bank failure", "bank stress",
+    # real estate / loans / insurance allocation
+    "real estate", "commercial real estate", "property",
+    "corporate loans", "insurance regulation", "capital requirement",
+    "solvency", "reinvestment",
+    # sg / fx / macro cross
+    "mas", "singapore", "sgd", "fx", "foreign exchange",
+    # broad market / allocation
+    "broad market", "index rebalance", "systemic",
+    # geopolitics / trade / sanctions (macro risk channel)
+    "sanctions", "tariff", "tariffs", "trade war", "trade deal",
+}
+
+_SECTOR_RELEVANCE_KEYWORDS = {
+    "bank", "banks", "lender", "lenders", "insurer", "insurance",
+    "sector", "industry",
+    "oil", "crude", "opec", "commodity", "commodities", "energy",
+    "semiconductor", "chip", "chips",
+}
+
+
+def _word_set(text: str) -> set[str]:
+    """Lowercased bag of word tokens — for word-boundary keyword matching."""
+    cleaned = []
+    for ch in text.lower():
+        cleaned.append(ch if ch.isalnum() else " ")
+    return set("".join(cleaned).split())
+
+
+_SINGLE_STOCK_PATTERN_HINTS = (
+    # Common single-stock noise patterns — if any of these appear in the
+    # title, we treat the item as "low" regardless of upstream category.
+    "stock surging", "stock surge", "stock jumps", "stock soars",
+    "stock plunges", "stock drops", "stock falls", "stock rises",
+    "ai downgrades", "ai upgrade", "ai upgrades",
+    "why is", "why are", "why does",
+    "what investors", "price target", "top stock",
+    "moved up by", "moved down by",
+    "could soar", "could jump", "could rally", "could surge",
+    "undervalued", "overvalued", "bull case", "bear case",
+)
+
+
+def classify_portfolio_relevance(item: NewsItem) -> str:
+    """
+    Decide whether a news item carries macro / sector / low relevance for
+    an insurance-investment book. Called once, before rendering.
+
+    "macro"  → deserves a portfolio-impact sentence.
+    "sector" → deserves a short sector-level read.
+    "low"    → single-stock or low-relevance; the formatter will NOT
+               force a "对组合影响" line.
+
+    Precedence:
+      1. Title matches a clear single-stock noise pattern → "low"
+         (even when the upstream source tagged it as "macro")
+      2. Macro keyword in title/summary → "macro"
+      3. Sector keyword in title/summary → "sector"
+      4. Category hint (macro/credit/singapore/regulation, etc.)
+      5. Otherwise → "low"
+
+    Rule #1 exists because sources like Alpha Vantage tag news with
+    broad topic labels ("Financial Markets" → category="macro") even for
+    pure single-stock headlines. Without this gate, items like
+    "Why Is Micron Stock Surging" would inherit a macro-bucket treatment.
+    """
+    raw = f"{item.title} {item.summary}".lower()
+    title_lower = item.title.lower()
+    tokens = _word_set(raw)
+
+    def _hits(keywords: set[str]) -> bool:
+        for kw in keywords:
+            if " " in kw or "-" in kw:
+                if kw in raw:
+                    return True
+            elif kw in tokens:
+                return True
+        return False
+
+    # Rule 1: obvious single-stock noise patterns veto any macro promotion
+    if any(p in title_lower for p in _SINGLE_STOCK_PATTERN_HINTS):
+        # Still allow sector promotion when the title carries an explicit
+        # sector cue — "Tesla (TSLA) stock surges on oil prices" is
+        # primarily a sector story. Pure single-stock → low.
+        if _hits(_SECTOR_RELEVANCE_KEYWORDS):
+            return "sector"
+        return "low"
+
+    # Rule 2: macro keyword in text
+    if _hits(_MACRO_RELEVANCE_KEYWORDS):
+        return "macro"
+
+    # Rule 3: sector keyword in text
+    if _hits(_SECTOR_RELEVANCE_KEYWORDS):
+        return "sector"
+
+    # Rule 4: category hint (treat as a weak default when text has no
+    # explicit keyword match). Note "equity" is NOT a sector hint — see
+    # the rule 1 rationale above.
+    macro_categories = {"rates", "credit", "singapore", "regulation"}
+    sector_only_categories = {"banking", "insurance", "commodities"}
+    cat = (item.category or "").lower()
+    if cat in macro_categories:
+        return "macro"
+    if cat in sector_only_categories:
+        return "sector"
+
+    # Rule 5: default — low relevance
+    return "low"
+
+
 def detect_topic_for_selection(item: NewsItem) -> str:
     text = f"{item.title} {item.summary}".lower()
 
@@ -237,12 +364,42 @@ def prepare_news_items(
 
     items.sort(key=lambda x: x.importance_score, reverse=True)
 
-    selected = select_diverse_top_items(items, top_n=top_n)
+    # Classify relevance BEFORE selection so we can prefer macro/sector
+    # items and let "low" items only act as fillers. This matches the
+    # Great Eastern SG insurance use-case: rates / credit / SG / macro
+    # trumps single-stock noise.
+    for it in items:
+        it.portfolio_relevance = classify_portfolio_relevance(it)
+
+    macro_pool = [it for it in items if it.portfolio_relevance == "macro"]
+    sector_pool = [it for it in items if it.portfolio_relevance == "sector"]
+    low_pool = [it for it in items if it.portfolio_relevance == "low"]
+
+    # Run the topic-diversity selector over the ranked macro+sector pool
+    # first. Only fall back to low-relevance items if we can't fill top_n.
+    preferred_pool = macro_pool + sector_pool
+    selected = select_diverse_top_items(preferred_pool, top_n=top_n)
+
+    if len(selected) < top_n:
+        # Top-up from low pool as last resort — don't let a quiet day
+        # force the brief into single-stock noise.
+        for it in low_pool:
+            if it in selected:
+                continue
+            selected.append(it)
+            if len(selected) >= top_n:
+                break
 
     if not selected:
         selected = items[:top_n]
 
+    # Keep pre-enrichment relevance since enricher rewrites summary.
+    pre_relevance = {id(it): it.portfolio_relevance for it in selected}
     enriched = enrich_news_items(selected, llm_callable=llm_callable)
+    for item in enriched:
+        item.portfolio_relevance = pre_relevance.get(
+            id(item), classify_portfolio_relevance(item)
+        )
 
     return enriched
 
@@ -257,33 +414,33 @@ def generate_market_takeaway(
 ) -> str:
     themes = []
 
-    if market_snapshot.rates and "暂时无法获取" not in market_snapshot.rates:
-        themes.append("利率预期")
-    if market_snapshot.us_equities and "暂时无法获取" not in market_snapshot.us_equities:
-        themes.append("美股表现")
-    if market_snapshot.asia_sg and "暂时无法获取" not in market_snapshot.asia_sg:
-        themes.append("亚洲/新加坡动态")
+    if market_snapshot.rates and "data unavailable" not in market_snapshot.rates:
+        themes.append("rate expectations")
+    if market_snapshot.us_equities and "data unavailable" not in market_snapshot.us_equities:
+        themes.append("US equities")
+    if market_snapshot.asia_sg and "data unavailable" not in market_snapshot.asia_sg:
+        themes.append("Asia / Singapore")
 
     if top_news:
         top_title = top_news[0].title.lower()
         if any(k in top_title for k in ["fed", "cpi", "inflation", "payroll"]):
-            themes.insert(0, "宏观数据")
+            themes.insert(0, "macro data")
         elif any(k in top_title for k in ["yield", "treasury", "rates"]):
-            themes.insert(0, "债券收益率")
+            themes.insert(0, "bond yields")
         elif any(k in top_title for k in ["earnings", "guidance", "profit"]):
-            themes.insert(0, "公司业绩")
+            themes.insert(0, "corporate earnings")
         elif any(k in top_title for k in ["singapore", "mas"]):
-            themes.insert(0, "新加坡/区域信号")
+            themes.insert(0, "Singapore / regional signal")
 
     if not themes:
-        return "今天市场整体较平静，重点更多在存量趋势延续。"
+        return "Market tone is subdued today; focus stays on the continuation of existing trends."
 
     unique_themes = []
     for t in themes:
         if t not in unique_themes:
             unique_themes.append(t)
 
-    return f"今天市场关注点集中在“{' + '.join(unique_themes[:3])}”。"
+    return f"Today's market focus is on {' + '.join(unique_themes[:3])}."
 
 
 # =========================
@@ -291,50 +448,64 @@ def generate_market_takeaway(
 # =========================
 
 def format_market_snapshot(snapshot: MarketSnapshot) -> str:
-    us = snapshot.us_equities or "暂无明显异常波动"
-    rates = snapshot.rates or "暂无明显异常变化"
-    asia = snapshot.asia_sg or "暂无突出区域信号"
+    us = snapshot.us_equities or "no notable moves"
+    rates = snapshot.rates or "no notable changes"
+    asia = snapshot.asia_sg or "no standout regional signal"
 
-    return (
-        f"📊 市场概览\n"
-        f"- 美股：{us}\n"
-        f"- 利率：{rates}\n"
-        f"- 亚洲/新加坡：{asia}"
-    )
+    lines = [
+        "📊 Market Snapshot",
+        f"- US equities: {us}",
+        f"- Rates: {rates}",
+        f"- Asia / Singapore: {asia}",
+    ]
+
+    sg_ext = getattr(snapshot, "singapore_extended", "") or ""
+    if sg_ext:
+        lines.append(f"- Singapore (extended): {sg_ext}")
+
+    return "\n".join(lines)
 
 
 def format_news_section(news_items: List[NewsItem], linked_reactions: Optional[dict] = None) -> str:
     if not news_items:
         return (
-            "📰 今日重点\n"
-            "1. 今日暂无特别突出的重大事件\n"
-            "   - 影响：市场较平静时，观察存量趋势和后续数据窗口更重要。"
+            "📰 Top stories\n"
+            "1. No standout events today\n"
+            "   - Read: quiet sessions call for a closer watch on existing trends and upcoming data."
         )
 
     if linked_reactions is None:
         linked_reactions = {}
 
-    lines = ["📰 今日重点"]
+    lines = ["📰 Top stories"]
     for idx, item in enumerate(news_items, start=1):
       lines.append(f"{idx}. {item.title}")
 
       if item.summary:
-        lines.append(f"   - 发生了什么：{item.summary}")
+        lines.append(f"   - What happened: {item.summary}")
 
-      if item.why_it_matters:
+      relevance = getattr(item, "portfolio_relevance", "macro")
+
+      if relevance == "low":
+        lines.append("   - Portfolio relevance: single-stock or low-relevance item — limited bearing on the insurance book, not flagged for core tracking.")
+      elif item.why_it_matters:
         impact_text = item.why_it_matters.strip()
-        impact_text = impact_text.removeprefix("对组合影响：").strip()
-        impact_text = impact_text.removeprefix("影响：").strip()
-        lines.append(f"   - 对组合影响：{impact_text}")
+        impact_text = impact_text.removeprefix("Portfolio impact:").strip()
+        impact_text = impact_text.removeprefix("Impact:").strip()
+        label = "Portfolio impact" if relevance == "macro" else "Sector read"
+        lines.append(f"   - {label}: {impact_text}")
       else:
-        lines.append("   - 对组合影响：这条信息有助于判断当天组合风险偏好和市场主线变化。")
+        if relevance == "macro":
+          lines.append("   - Portfolio impact: relevant for today's risk-appetite read and the dominant market theme.")
+        else:
+          lines.append("   - Sector read: sector-level signal with limited spillover to the overall book.")
 
       # Linked community reaction
       reaction = linked_reactions.get(idx - 1)  # idx is 1-based, dict is 0-based
       if reaction:
-        sent_cn = _SENTIMENT_CN.get(reaction.sentiment, "中性")
+        sent_en = _SENTIMENT_EN.get(reaction.sentiment, "neutral")
         angle = reaction.topic_label or reaction.discussion_focus
-        line = f"   - 社区反应：{reaction.post_count} 条讨论 · 情绪{sent_cn}"
+        line = f"   - Community reaction: {reaction.post_count} posts · sentiment {sent_en}"
         if angle:
             line += f" · {angle}"
         lines.append(line)
@@ -342,11 +513,11 @@ def format_news_section(news_items: List[NewsItem], linked_reactions: Optional[d
     return "\n".join(lines)
 
 
-_SENTIMENT_CN = {
-    "bullish": "偏多",
-    "bearish": "偏空",
-    "neutral": "中性",
-    "mixed": "分歧",
+_SENTIMENT_EN = {
+    "bullish": "bullish",
+    "bearish": "bearish",
+    "neutral": "neutral",
+    "mixed": "mixed",
 }
 
 
@@ -363,25 +534,27 @@ def _format_topic_lines(topic, idx: int, compact: bool = False) -> list[str]:
     free-text 保险角度 line.
     """
     from community.verbalize import (
+        align_insurance_framework,
         derive_insurance_framework,
         render_insurance_framework,
         sentiment_score_tail,
+        soften_market_implication,
         verbalize_sentiment,
         verbalize_trend,
     )
 
     headline = (getattr(topic, "headline", "") or "").strip()
-    primary = headline or topic.rule_label or "（未命名主题）"
+    primary = headline or topic.rule_label or "(unnamed topic)"
     platforms = "/".join(topic.platforms) if topic.platforms else ""
 
-    # Meta chip: [reddit | 7贴 | 可信度 0.48]
+    # Meta chip: [reddit | 7 posts | cred 0.48]
     meta_parts = []
     if platforms:
         meta_parts.append(platforms)
-    meta_parts.append(f"{topic.post_count}贴")
-    meta_parts.append(f"可信度{topic.credibility.overall:.2f}")
+    meta_parts.append(f"{topic.post_count} posts")
+    meta_parts.append(f"cred {topic.credibility.overall:.2f}")
     if topic.credibility.is_noise:
-        meta_parts.append("噪音")
+        meta_parts.append("noise")
     meta = f"[{' | '.join(meta_parts)}]"
 
     header = f"{idx}. 📍 {primary}  {meta}"
@@ -392,32 +565,37 @@ def _format_topic_lines(topic, idx: int, compact: bool = False) -> list[str]:
     if trend is not None:
         trend_phrase = verbalize_trend(trend)
         if trend_phrase:
-            lines.append(f"   趋势：{trend_phrase}")
+            lines.append(f"   Trend: {trend_phrase}")
 
     # Sentiment line — business phrase first, numeric tail in parens
     if not topic.credibility.is_noise:
         sent_phrase = verbalize_sentiment(topic.sentiment)
         tail = sentiment_score_tail(topic.sentiment)
         if sent_phrase:
-            lines.append(f"   情绪：{sent_phrase}{tail}")
+            lines.append(f"   Sentiment: {sent_phrase}{tail}")
 
     if topic.discussion_focus:
-        lines.append(f"   争论点：{topic.discussion_focus}")
+        lines.append(f"   Debate: {topic.discussion_focus}")
     if topic.market_relevance:
-        lines.append(f"   市场含义：{topic.market_relevance}")
+        softened = soften_market_implication(topic)
+        if softened:
+            lines.append(f"   Market read: {softened}")
 
     # Insurance framework (two-layer). Prefer LLM-provided; fall back to
     # derived observation framework so we never show a bare instruction.
     framework = getattr(topic, "insurance_framework", None)
     if framework is None or (not framework.implications and not framework.triggers):
         framework = derive_insurance_framework(topic)
+    # Align the framework with the softened market implication so we
+    # don't get "cautious read → aggressive allocation call".
+    framework = align_insurance_framework(framework, topic)
     lines.extend(render_insurance_framework(framework))
 
     # Reasons line adds length without adding much signal when compact
     if not compact:
         reasons = (getattr(topic, "reasons", "") or "").strip()
         if reasons:
-            lines.append(f"   理由：{reasons}")
+            lines.append(f"   Rationale: {reasons}")
 
     return lines
 
@@ -439,55 +617,113 @@ def format_community_section(
       - Insurance angle
       - Editor recommendation
     """
+    import logging as _logging
+    _log = _logging.getLogger(__name__)
+
     if not sentiments:
         return ""
 
     total_posts = sum(s.post_count for s in sentiments)
     platforms = [s.platform.capitalize() for s in sentiments if s.post_count > 0]
-    platform_label = " + ".join(platforms) if platforms else "社区"
+    platform_label = " + ".join(platforms) if platforms else "Community"
 
     # Pick topics to render: prefer analyst-selected headlines, but fall back
     # to unlinked or all when report is absent.
     if analyst_report is not None and analyst_report.headline_topics:
-        primary_topics = analyst_report.headline_topics
+        primary_topics = list(analyst_report.headline_topics)
     elif unlinked_topics is not None:
-        primary_topics = unlinked_topics
+        primary_topics = list(unlinked_topics)
     else:
         primary_topics = []
         for s in sentiments:
             primary_topics.extend(s.trending_topics)
 
-    # When both the analyst picked headlines AND the news pipeline linked some
-    # topics inline, keep the analyst's picks that are still unlinked.
-    if unlinked_topics is not None and analyst_report is not None and analyst_report.headline_topics:
-        unlinked_ids = {getattr(t, "cluster_id", id(t)) for t in unlinked_topics}
-        primary_topics = [
-            t for t in primary_topics
-            if getattr(t, "cluster_id", id(t)) in unlinked_ids
-        ]
+    analyst_selected_count = (
+        len(analyst_report.headline_topics)
+        if analyst_report is not None else 0
+    )
+    count_before_should_include = len(primary_topics)
 
-    primary_topics = [
+    # Analyst picks override per-cluster `should_include_in_brief`. The
+    # analyst ran a second LLM pass with full cross-cluster context, so
+    # if it explicitly picked a topic we trust that judgement even if the
+    # per-cluster LLM had marked should_include=False. Without this
+    # override, analyst=3 collapses to rendered=1 whenever two LLM passes
+    # disagree, which is exactly the "前后数量不一致" bug.
+    #
+    # We still drop clusters the pipeline considers outright noise, since
+    # that's a stronger signal than a soft include/exclude vote.
+    analyst_picked_ids = set()
+    if analyst_report is not None:
+        analyst_picked_ids = {
+            getattr(t, "cluster_id", id(t))
+            for t in analyst_report.headline_topics
+        }
+
+    def _keep(t) -> bool:
+        if t.credibility.is_noise:
+            return False
+        if getattr(t, "cluster_id", id(t)) in analyst_picked_ids:
+            return True
+        return getattr(t, "should_include_in_brief", True)
+
+    dropped_by_noise = [t for t in primary_topics if t.credibility.is_noise]
+    dropped_by_should_include = [
         t for t in primary_topics
-        if getattr(t, "should_include_in_brief", True) and not t.credibility.is_noise
+        if not getattr(t, "should_include_in_brief", True)
+        and getattr(t, "cluster_id", id(t)) not in analyst_picked_ids
+        and t not in dropped_by_noise
     ]
+    primary_topics = [t for t in primary_topics if _keep(t)]
+
+    rendered_count = len(primary_topics)
+    if analyst_report is not None:
+        # Stash the headline counts on the report so daily_job (which owns
+        # the on-disk logger) can surface the pre-filter vs post-filter
+        # totals in its pipeline summary.
+        analyst_report.render_stats = {
+            "analyst_selected": analyst_selected_count,
+            "formatter_rendered": rendered_count,
+            "dropped_by_noise": len(dropped_by_noise),
+            "dropped_by_should_include": len(dropped_by_should_include),
+        }
+    if analyst_selected_count and rendered_count != analyst_selected_count:
+        reasons = []
+        if dropped_by_noise:
+            reasons.append(f"noise={len(dropped_by_noise)}")
+        if dropped_by_should_include:
+            reasons.append(f"should_include=false×{len(dropped_by_should_include)}")
+        reason_str = ", ".join(reasons) or "unknown"
+        _log.info(
+            "community: analyst selected %d headline(s), formatter rendered %d (dropped: %s)",
+            analyst_selected_count,
+            rendered_count,
+            reason_str,
+        )
+    elif analyst_selected_count:
+        _log.info(
+            "community: analyst selected %d headline(s), formatter rendered %d (no drop)",
+            analyst_selected_count,
+            rendered_count,
+        )
 
     if not primary_topics and not analyst_report:
         return ""
 
-    # Signal summary: N 贴 · M 聚类 · K 入选 · L 噪音
+    # Signal summary: N posts · M clusters · K selected · L noise
     if analyst_report is not None:
-        summary_parts = [f"{total_posts} 贴"]
+        summary_parts = [f"{total_posts} posts"]
         if analyst_report.total_clusters:
-            summary_parts.append(f"{analyst_report.total_clusters} 聚类")
-        summary_parts.append(f"{len(analyst_report.headline_topics)} 入选")
+            summary_parts.append(f"{analyst_report.total_clusters} clusters")
+        summary_parts.append(f"{len(analyst_report.headline_topics)} selected")
         if analyst_report.noise_topics:
-            summary_parts.append(f"{len(analyst_report.noise_topics)} 噪音")
+            summary_parts.append(f"{len(analyst_report.noise_topics)} noise")
         signal_summary = " · ".join(summary_parts)
     else:
-        signal_summary = f"{total_posts} 贴"
+        signal_summary = f"{total_posts} posts"
 
     lines = [
-        "💬 社区情绪解读",
+        "💬 Community Sentiment",
         f"{platform_label} · {signal_summary}",
     ]
 
@@ -498,12 +734,22 @@ def format_community_section(
             if s and not s.startswith(tuple(p.lower() + "=ok" for p in platforms))
         ]
         if coverage:
-            lines.append(f"数据覆盖：{' | '.join(coverage)}")
+            lines.append(f"Data coverage: {' | '.join(coverage)}")
 
-        if analyst_report.sentiment_structure:
-            lines.append(f"整体情绪：{analyst_report.sentiment_structure}")
+        from community.verbalize import compose_sentiment_structure
+        # Always route sentiment structure through the composer so stacked
+        # model-label phrasing never reaches the user. Raw llm text is kept
+        # on the report for internal use.
+        all_clusters_for_struct = list(analyst_report.headline_topics)
+        all_clusters_for_struct.extend(analyst_report.noise_topics)
+        sentiment_line = compose_sentiment_structure(
+            all_clusters_for_struct,
+            llm_text=analyst_report.sentiment_structure,
+        )
+        if sentiment_line:
+            lines.append(f"Overall sentiment: {sentiment_line}")
         if analyst_report.cross_platform_signal:
-            lines.append(f"跨平台信号：{analyst_report.cross_platform_signal}")
+            lines.append(f"Cross-platform signal: {analyst_report.cross_platform_signal}")
 
     # News ↔ Social bridge — bridges the news section and community topics.
     # Rendered after sentiment structure so reader sees the comparison
@@ -512,7 +758,7 @@ def format_community_section(
     if not bridge_text and analyst_report is not None:
         bridge_text = analyst_report.news_social_bridge
     if bridge_text:
-        lines.append(f"新闻 ↔ 社区：{bridge_text}")
+        lines.append(f"News ↔ Social: {bridge_text}")
 
     if primary_topics:
         compact = len(platforms) <= 1
@@ -525,17 +771,17 @@ def format_community_section(
         has_framework = framework is not None and (framework.implications or framework.triggers)
         if has_framework:
             lines.append("")
-            lines.append("🛡 保险组合视角（观察框架）")
+            lines.append("🛡 Insurance-book view (watch framework)")
             if framework.implications:
-                lines.append(f"   配置含义：{framework.implications}")
+                lines.append(f"   Allocation read: {framework.implications}")
             if framework.triggers:
-                lines.append(f"   观察/触发条件：{framework.triggers}")
+                lines.append(f"   Watch / triggers: {framework.triggers}")
         elif analyst_report.insurance_angle:
             # Legacy fallback — still render as observation, not instruction
             lines.append("")
-            lines.append(f"🛡 保险组合视角：{analyst_report.insurance_angle}")
+            lines.append(f"🛡 Insurance-book view: {analyst_report.insurance_angle}")
         if analyst_report.brief_recommendation:
-            lines.append(f"📝 编辑建议：{analyst_report.brief_recommendation}")
+            lines.append(f"📝 Editor's note: {analyst_report.brief_recommendation}")
 
     return "\n".join(lines).rstrip()
 
@@ -543,12 +789,12 @@ def format_community_section(
 def format_watchlist(watchlist: List[str]) -> str:
     if not watchlist:
         watchlist = [
-            "关注今晚是否有新的关键宏观数据",
-            "关注美联储官员表态",
-            "关注长端利率是否继续波动",
+            "Watch for any key US macro prints later tonight",
+            "Watch Fed officials' commentary",
+            "Watch whether long-end yields keep moving",
         ]
 
-    lines = ["👀 后续关注"]
+    lines = ["👀 Watchlist"]
     for item in watchlist[:3]:
         lines.append(f"- {item}")
     return "\n".join(lines)
@@ -598,9 +844,9 @@ def format_daily_brief(
 
     # ── Assemble brief ────────────────────────────────────────────────
     parts = [
-        f"📌 每日金融简报 | {briefing_input.date_str}",
+        f"📌 Daily Financial Brief | {briefing_input.date_str}",
         "",
-        "一句话总结：",
+        "Bottom line:",
         takeaway,
         "",
         format_market_snapshot(briefing_input.market_snapshot),
@@ -636,34 +882,34 @@ if __name__ == "__main__":
     sample_input = BriefingInput(
         date_str=datetime.now().strftime("%Y-%m-%d"),
         market_snapshot=MarketSnapshot(
-            us_equities="S&P 500 小幅上涨，Nasdaq 表现相对更强",
-            rates="10Y Treasury yield 报 4.29%，较前一交易日下行 0.05 个百分点",
-            asia_sg="STI 走势平稳",
+            us_equities="S&P 500 modestly higher, Nasdaq outperforms",
+            rates="10Y Treasury yield at 4.29%, down 5 bps from the prior session",
+            asia_sg="STI trades steady",
         ),
         news_items=[
             NewsItem(
                 title="Fed rate cut bets revived, a bit, by Iran war ceasefire - Reuters",
-                summary="市场对年内降息的押注有所回升。",
+                summary="Market pricing for rate cuts this year has firmed.",
                 source="Reuters",
                 category="macro",
             ),
             NewsItem(
                 title="US bank profits to rise on deals, but Iran war fuels outlook uncertainty - Reuters",
-                summary="银行盈利前景获得部分支撑，但地缘风险仍让市场保持谨慎。",
+                summary="Bank earnings find partial support, though geopolitical risk keeps the market cautious.",
                 source="Reuters",
                 category="equity",
             ),
             NewsItem(
                 title="Singapore financial sector sees stable outlook amid regional uncertainty",
-                summary="在区域不确定性背景下，新加坡金融板块整体维持相对稳健预期。",
+                summary="Against a backdrop of regional uncertainty, Singapore's financial sector holds a relatively steady outlook.",
                 source="Straits Times",
                 category="singapore",
             ),
         ],
         watchlist=[
-            "今晚是否有新的美国通胀或就业相关数据",
-            "美债收益率是否继续波动",
-            "亚洲市场对美国利率预期的跟随反应",
+            "Whether new US inflation or payrolls data prints tonight",
+            "Whether Treasury yields keep moving",
+            "How Asian markets track the US rate-path reset",
         ],
     )
 

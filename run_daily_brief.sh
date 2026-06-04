@@ -2,13 +2,13 @@
 # ─── NanoBot Daily Brief Runner ──────────────────────────────────────────────
 # Called by launchd (com.nanobot.dailybrief) every day at 08:00.
 # 1. Loads .env for API keys
-# 2. Ensures Ollama is running (auto-starts if needed)
+# 2. Ensures Ollama is running (chat LLM + embeddings)
 # 3. Runs the Python pipeline
 # ─────────────────────────────────────────────────────────────────────────────
 
 set -euo pipefail
 
-PROJECT_DIR="/Users/yangyang/Desktop/nanobot_project"
+PROJECT_DIR="/Users/yangyang/nanobot_project"
 LOG_FILE="${PROJECT_DIR}/logs/cron_run.log"
 
 # Timestamp helper
@@ -22,7 +22,7 @@ set -a
 source "${PROJECT_DIR}/.env"
 set +a
 
-# ── 2. Ensure Ollama is running ──────────────────────────────────────────────
+# ── 2. Ensure Ollama is running (chat LLM + embeddings) ─────────────────────
 OLLAMA_BIN="/usr/local/bin/ollama"
 
 if ! pgrep -xq "ollama"; then
@@ -33,7 +33,7 @@ if ! pgrep -xq "ollama"; then
     elif [ -x "$OLLAMA_BIN" ]; then
         "$OLLAMA_BIN" serve &>/dev/null &
     else
-        echo "[$(ts)] WARNING: Cannot find Ollama binary, LLM fallback will be used" >> "$LOG_FILE"
+        echo "[$(ts)] WARNING: Cannot find Ollama binary, embedding fallback will be used" >> "$LOG_FILE"
     fi
 
     # Wait up to 30s for Ollama to become healthy
@@ -56,6 +56,15 @@ fi
 cd "${PROJECT_DIR}/app" || exit 1
 source "${PROJECT_DIR}/.venv/bin/activate"
 
+# 3a. Feed: push curated prediction-market + news + community items into the
+#     #prediction-markets Discord channel. The daily_job's community pipeline
+#     reads this channel, so the feed must land first.
+echo "[$(ts)] Running prediction_markets_feed..." >> "$LOG_FILE"
+python prediction_markets_feed.py real >> "$LOG_FILE" 2>&1 || {
+    echo "[$(ts)] WARNING: prediction_markets_feed failed, continuing anyway" >> "$LOG_FILE"
+}
+
+# 3b. Daily brief
 python daily_job.py >> "$LOG_FILE" 2>&1
 EXIT_CODE=$?
 

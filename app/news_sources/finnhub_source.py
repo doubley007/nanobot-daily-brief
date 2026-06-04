@@ -55,7 +55,7 @@ def fetch_from_finnhub(
         if not title:
             continue
 
-        summary = (item.get("summary") or "").strip() or "暂无摘要"
+        summary = (item.get("summary") or "").strip() or "no summary available"
         source = (item.get("source") or "Unknown").strip()
         url = item.get("url")
         published_at = item.get("datetime")

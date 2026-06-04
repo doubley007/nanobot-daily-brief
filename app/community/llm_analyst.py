@@ -118,20 +118,21 @@ def score_cluster_credibility(cluster: TopicCluster) -> CredibilityProfile:
 # ─── Prompt 1: per-cluster interpretation ────────────────────────────────────
 
 _CLUSTER_PROMPT_EXAMPLE = (
-    '示例（仅供格式参考，不要照抄内容）：\n'
-    '输入标题包含"Fed minutes dovish, Powell hints at Q2 cut"等\n'
-    '合格输出：{\n'
-    '  "real_topic": "FOMC 纪要转鸽推升二季度降息押注",\n'
-    '  "discussion_focus": "多头认为CPI趋缓已到降息临界点；空头担心劳动市场仍紧、降息被推迟",\n'
-    '  "market_relevance": "利好久期（10Y 利率下行空间），利好金矿与利率敏感股；对银行净息差形成压力",\n'
-    '  "insurance_implications": "对久期管理可能打开延长窗口；对信用利差存在进一步收窄的方向压力；再投资收益率的走向需结合后续利率路径确认",\n'
-    '  "insurance_triggers": "继续观察长端利率是否有效跌破4.10%；只有在伴随更软的通胀或劳动力数据时，才考虑真正延长久期"\n'
+    'Example (format reference only — do NOT copy content):\n'
+    'Input titles include "Fed minutes dovish, Powell hints at Q2 cut" etc.\n'
+    'A qualifying output:\n'
+    '{\n'
+    '  "real_topic": "FOMC minutes turn dovish, lifting Q2 rate-cut bets",\n'
+    '  "discussion_focus": "Bulls argue softening CPI has reached the cut threshold; bears worry the labor market is still tight and any cut will slip",\n'
+    '  "market_relevance": "Bullish for duration (room for 10Y to fall); bullish for gold miners and rate-sensitive equities; puts pressure on bank NIM",\n'
+    '  "insurance_implications": "Potentially opens a duration-extension window; modest pressure toward tighter credit spreads; reinvestment-yield direction still needs confirmation from the forward rate path",\n'
+    '  "insurance_triggers": "Keep watching whether the long end breaks cleanly below 4.10%; only consider actually extending duration on confirmation from softer inflation or labor data"\n'
     '}\n'
-    '反面示例（禁止）：\n'
-    '- "对商品市场风险影响"（方向不明、和 real_topic 重复）\n'
-    '- "延长固收久期0.3-0.5年"（证据链不够强时不应给出这种具体数字指令）\n'
-    '- "关注信用利差和汇率变动"（没说方向、没说观察条件）\n'
-    '- "市场关注美联储政策"（泛化总结）\n\n'
+    'Counter-examples (forbidden):\n'
+    '- "Effect on commodity-market risk" (direction unclear, duplicates real_topic)\n'
+    '- "Extend fixed-income duration 0.3-0.5 years" (concrete number instruction not justified by the evidence)\n'
+    '- "Watch credit spreads and FX moves" (no direction, no observation conditions)\n'
+    '- "Market watching Fed policy" (generic summary)\n\n'
 )
 
 
@@ -139,46 +140,49 @@ def _build_cluster_prompt(cluster: TopicCluster) -> str:
     titles = _top_titles(cluster.posts)
     titles_block = "\n".join(f"- {t}" for t in titles)
     platforms = ", ".join(cluster.platforms) or cluster.posts[0].platform
-    rule_hint = cluster.rule_label or "未分类"
+    rule_hint = cluster.rule_label or "uncategorized"
 
     return (
-        "你是新加坡保险投资团队的社区分析师。任务不是复述标题，而是：\n"
-        "(1) 指明具体催化剂；(2) 给出方向明确的大类资产含义；"
-        "(3) 给出可执行的保险组合调整提示。\n\n"
+        "You are a community analyst for a Singapore insurance investment team. "
+        "Your task is NOT to paraphrase titles — it is to: "
+        "(1) name the specific catalyst; "
+        "(2) give a directionally clear cross-asset read; "
+        "(3) give actionable insurance-book observations. "
+        "Respond in English.\n\n"
         f"{_CLUSTER_PROMPT_EXAMPLE}"
-        f"覆盖平台：{platforms}\n"
-        f"关键词粗分类：{rule_hint}\n"
-        f"帖子数量：{cluster.post_count}\n"
-        f"是否热度上升：{'是' if cluster.is_rising else '否'}"
-        f"（相对热度 {cluster.rise_ratio:.2f}x）\n"
-        f"热门标题（按互动排序）：\n{titles_block}\n\n"
-        "严格输出一个 JSON（不要 markdown、不要解释）。硬规则：\n"
-        "- market_relevance 必须包含『利好/利空/施压/承压/收窄/走阔/上行/下行』等方向词，"
-        "且必须点名至少一类资产（久期 / 股指 / 信用利差 / 商品 / 外汇）。\n"
-        "- insurance_implications 写成『可能影响 / 对X存在压力 / 需结合Y确认』这类观察性语言，"
-        "涵盖 固收久期 / 信用配置 / 再投资收益率 / 利率敏感资产 中的 1-2 项。"
-        "不要给出具体的加减仓数字（例如『延长0.3年』『减5%』），除非 credibility_judgment >= 0.8 且证据非常直接。\n"
-        "- insurance_triggers 必须指明『继续观察什么』以及『只有在什么条件成立时才考虑进一步动作』。\n"
-        "- 禁止使用：『市场关注』『投资者讨论』『需留意』『构成影响』这类无方向表述。\n"
-        "- 禁止把 real_topic 和 market_relevance 写成同一句话。\n"
-        "- sentiment_dimensions 中，只有确实主导情绪时才给 >= 0.6 的分。"
-        "若情绪确实平淡/分歧，各维度应在 0.3-0.5 之间，不要强行拔高。\n\n"
-        "字段：\n"
+        f"Platforms covered: {platforms}\n"
+        f"Coarse keyword bucket: {rule_hint}\n"
+        f"Post count: {cluster.post_count}\n"
+        f"Is chatter rising: {'yes' if cluster.is_rising else 'no'}"
+        f" (relative heat {cluster.rise_ratio:.2f}x)\n"
+        f"Top titles (by engagement):\n{titles_block}\n\n"
+        "Strict JSON output (no markdown, no explanation). Hard rules:\n"
+        "- market_relevance must include a direction word (bullish/bearish/pressures/supportive/tighten/widen/up/down) "
+        "and name at least one asset class (duration / equity index / credit spread / commodity / FX).\n"
+        "- insurance_implications must read like an observation ('may affect', 'pressure on X', 'needs to be read with Y'), "
+        "covering 1-2 of: fixed-income duration, credit allocation, reinvestment yield, rate-sensitive assets. "
+        "Do NOT give concrete size instructions (e.g. 'extend 0.3 years', 'cut 5%') unless credibility_judgment >= 0.8 AND evidence is very direct.\n"
+        "- insurance_triggers must name 'what to keep watching' AND 'under what condition further action would be considered'.\n"
+        "- Forbidden phrasing: 'the market is watching', 'investors are discussing', 'worth monitoring', 'has an impact' — anything without direction.\n"
+        "- Do NOT write real_topic and market_relevance as the same sentence.\n"
+        "- For sentiment_dimensions: only score >= 0.6 when the dimension genuinely dominates. "
+        "If sentiment is actually flat or split, scores should sit in 0.3-0.5 — don't inflate.\n\n"
+        "Fields (respond in English):\n"
         "{\n"
-        '  "real_topic": "10-22字。具体事件或催化剂；若与粗分类不符请直接修正",\n'
-        '  "discussion_focus": "25-50字。争论点 + 多空双方的分歧理由",\n'
-        '  "reasons": "40-80字。支持情绪判断的 2-3 条依据，连写一段",\n'
+        '  "real_topic": "~10-20 words. Specific event or catalyst; correct the coarse bucket if it disagrees.",\n'
+        '  "discussion_focus": "~25-50 words. The point of debate + the case from each side.",\n'
+        '  "reasons": "~40-80 words. 2-3 reasons supporting your sentiment call, as one paragraph.",\n'
         '  "sentiment_label": "bullish / bearish / neutral / mixed",\n'
         '  "sentiment_dimensions": {\n'
         '    "optimism": 0-1, "fear": 0-1, "uncertainty": 0-1,\n'
         '    "skepticism": 0-1, "hype": 0-1\n'
         "  },\n"
-        '  "credibility_judgment": 0-1。1.0 = 有明确事件+数据+专业表述；0.0 = 纯情绪/meme,\n'
+        '  "credibility_judgment": 0-1. 1.0 = clear event + data + professional language; 0.0 = pure emotion / meme,\n'
         '  "is_noise": true/false,\n'
-        '  "should_include_in_brief": true/false。仅当对宏观/大类配置/风险判断有价值时 true,\n'
-        '  "market_relevance": "30-50字。方向明确 + 点名资产类别。若 should_include=false 返回空字符串",\n'
-        '  "insurance_implications": "40-70字。保险/配置含义，观察性语言，不给具体数字指令",\n'
-        '  "insurance_triggers": "30-60字。继续观察的变量 + 触发进一步动作的条件"\n'
+        '  "should_include_in_brief": true/false. True only if it adds value for macro / cross-asset / risk reads,\n'
+        '  "market_relevance": "~30-50 words. Directionally clear + asset class named. Return empty string when should_include=false.",\n'
+        '  "insurance_implications": "~40-70 words. Insurance / allocation read, observation language, no concrete-size instructions.",\n'
+        '  "insurance_triggers": "~30-60 words. What to keep watching + the condition that would justify further action."\n'
         "}"
     )
 
@@ -267,15 +271,15 @@ def _format_cluster_for_analyst(c: TopicCluster, idx: int) -> str:
     top_dim = dims.dominant_dimension or "neutral"
     return (
         f"{idx}. [{', '.join(c.platforms)}] {c.headline or c.rule_label}\n"
-        f"   热度：{c.heat_score:.0f} ({c.post_count}贴) "
-        f"{'（升温）' if c.is_rising else ''}\n"
-        f"   情绪：{dims.label}，主导维度={top_dim}({dims.intensity:.2f})"
+        f"   Heat: {c.heat_score:.0f} ({c.post_count} posts) "
+        f"{'(rising)' if c.is_rising else ''}\n"
+        f"   Sentiment: {dims.label}, dominant={top_dim}({dims.intensity:.2f})"
         f" [opt={dims.optimism:.2f} fear={dims.fear:.2f}"
         f" unc={dims.uncertainty:.2f} skep={dims.skepticism:.2f} hype={dims.hype:.2f}]\n"
-        f"   可信度：{c.credibility.overall:.2f}"
-        f"{'（噪音）' if c.credibility.is_noise else ''}\n"
-        f"   争论点：{c.discussion_focus}\n"
-        f"   保险角度：{c.insurance_angle or '—'}"
+        f"   Credibility: {c.credibility.overall:.2f}"
+        f"{' (noise)' if c.credibility.is_noise else ''}\n"
+        f"   Debate: {c.discussion_focus}\n"
+        f"   Insurance angle: {c.insurance_angle or '—'}"
     )
 
 
@@ -287,51 +291,55 @@ def _build_analyst_prompt(
     cluster_block = "\n".join(_format_cluster_for_analyst(c, i + 1) for i, c in enumerate(clusters))
     single_platform = len(platforms) <= 1
     cross_platform_rule = (
-        '  "cross_platform_signal": "今日仅覆盖 '
-        f'{platforms[0] if platforms else "单一"}'
-        '，无跨平台数据，请直接返回空字符串"'
+        '  "cross_platform_signal": "Today we cover only '
+        f'{platforms[0] if platforms else "a single"}'
+        ' — no cross-platform data; return empty string."'
         if single_platform
         else
-        '  "cross_platform_signal": "40-80字。只有当≥2个平台指向同一话题时才写，'
-        '必须点名具体话题和一致方向；若平台间实际分化也写明。若无法得出跨平台结论返回空字符串"'
+        '  "cross_platform_signal": "~40-80 words. Only write when >=2 platforms point to the same topic. '
+        'Must name the specific topic and the consistent direction; if platforms actually diverge, state that. '
+        'Return empty string if no cross-platform read can be drawn."'
     )
 
     return (
-        "你是服务新加坡保险投资团队的社区分析师（Community Analyst）。"
-        "以下是今天 Reddit/X/Discord 社区讨论经过聚类+多维情绪+可信度打分后的结构化结果。"
-        "你的工作是：\n"
-        "  - 挑出真正值得进日报的主题（headline_topics）\n"
-        "  - 指出哪些是噪音（noise_topics）\n"
-        "  - 用『情绪结构』而不是单一标签概括今天的讨论气氛\n"
-        "  - 用方向明确、可执行的语言给出保险组合含义\n"
-        "绝对不要编造未在结构化输入中出现的主题。\n\n"
-        f"覆盖平台：{', '.join(platforms) if platforms else '无'}\n"
-        f"总帖子数：{total_posts}\n"
-        f"聚类数：{len(clusters)}\n\n"
-        "结构化输入：\n"
+        "You are the Community Analyst serving a Singapore insurance investment team. "
+        "Below are structured results for today's Reddit/X/Discord discussion after clustering, "
+        "multi-dimensional sentiment scoring, and credibility scoring. Respond in English.\n\n"
+        "Your job is to:\n"
+        "  - pick the topics that genuinely belong in the daily brief (headline_topics);\n"
+        "  - flag the noise (noise_topics);\n"
+        "  - summarize today's discussion with a 'sentiment structure' rather than a single label;\n"
+        "  - articulate insurance-book implications in direction-clear, actionable language.\n"
+        "Do NOT invent topics that are not in the structured input.\n\n"
+        f"Platforms covered: {', '.join(platforms) if platforms else 'none'}\n"
+        f"Total posts: {total_posts}\n"
+        f"Clusters: {len(clusters)}\n\n"
+        "Structured input:\n"
         f"{cluster_block}\n\n"
-        "硬规则：\n"
-        "- headline_topics 必须至少有一个 cluster 的 credibility >= 0.5；"
-        "若所有 cluster 都是噪音或可信度不足，返回空数组。\n"
-        "- sentiment_structure 必须使用业务语言（如：观望为主+不确定性较高 / 分歧明显+担忧主导 / "
-        "避险情绪升温），不要使用『分歧·主导X(0.70)』这种模型标签形式。\n"
-        "- insurance_implications 用观察性语言描述『对久期/信用/再投资收益率/利率敏感资产的可能影响』，"
-        "避免直接给出具体加减仓数字（如『延长0.3年』），除非多条 cluster 的 credibility 都 >= 0.7。\n"
-        "- insurance_triggers 必须说明『继续观察什么变量』+『只有在什么条件成立时才考虑进一步动作』。\n"
-        "- 禁止『市场关注』『值得留意』『构成影响』等无方向表述。\n\n"
-        "严格输出 JSON：\n"
+        "Hard rules:\n"
+        "- headline_topics must include at least one cluster with credibility >= 0.5; "
+        "if every cluster is noise or below threshold, return an empty array.\n"
+        "- sentiment_structure must use business language (e.g. 'wait-and-see with high uncertainty', "
+        "'split with fear dominating', 'risk-off tone building'). Do NOT use model-label syntax like 'mixed·fear(0.70)'.\n"
+        "- insurance_implications should read as observation-language covering the likely effect on "
+        "duration / credit / reinvestment yields / rate-sensitive assets. "
+        "Avoid concrete size instructions (e.g. 'extend 0.3 years') unless multiple clusters score credibility >= 0.7.\n"
+        "- insurance_triggers must name 'what variable(s) to keep watching' AND 'under what condition further action would be considered'.\n"
+        "- Forbidden: 'the market is watching', 'worth monitoring', 'has an impact' — anything without direction.\n\n"
+        "Strict JSON output (respond in English):\n"
         "{\n"
-        '  "headline_topics": [最多 3 个 cluster 序号的数字数组],\n'
-        '  "noise_topics": [最多 3 个 cluster 序号的数字数组],\n'
-        '  "sentiment_structure": "60-110字。业务语言描述整体情绪组合（如：观望为主，不确定性较高；'
-        '分歧明显，担忧主导；避险情绪升温）。不要使用模型标签形式",\n'
+        '  "headline_topics": [up to 3 cluster index numbers],\n'
+        '  "noise_topics": [up to 3 cluster index numbers],\n'
+        '  "sentiment_structure": "~60-110 words. Business-language description of the overall sentiment mix '
+        '(e.g. wait-and-see with high uncertainty; split with fear dominating; risk-off tone building). '
+        'Do NOT use model-label syntax.",\n'
         f"{cross_platform_rule},\n"
-        '  "insurance_implications": "50-100字。保险组合各维度可能受影响的方向（久期/信用/再投资收益率/'
-        '利率敏感资产中的 1-2 项），采用观察性语言，不给具体数字指令",\n'
-        '  "insurance_triggers": "40-80字。继续观察的 1-2 个关键变量 + 触发进一步动作的条件（例如长端利率'
-        '是否有效跌破/突破某一区间、情绪是否向X/主流媒体扩散）",\n'
-        '  "brief_recommendation": "40-80字。告诉日报编辑今天社区部分应突出哪个主题、'
-        '弱化哪个主题，说明理由"\n'
+        '  "insurance_implications": "~50-100 words. Likely directional effect on 1-2 of '
+        '(duration / credit / reinvestment yield / rate-sensitive assets). Observation language, no concrete-size instructions.",\n'
+        '  "insurance_triggers": "~40-80 words. 1-2 key variables to keep watching + the condition that would '
+        'trigger further action (e.g. whether the long end breaks through a specific band; whether sentiment spreads to X / mainstream media).",\n'
+        '  "brief_recommendation": "~40-80 words. Tell the editor which community topic to lead with today, '
+        'which to de-emphasize, and why."\n'
         "}"
     )
 

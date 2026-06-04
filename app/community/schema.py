@@ -202,6 +202,10 @@ class CommunityAnalystReport:
     total_clusters: int = 0              # how many clusters fed into the analyst
     # Per-platform status strings (e.g. "reddit=ok 59贴", "x=plan limit 402")
     platform_status: list[str] = field(default_factory=list)
+    # Populated by the formatter after rendering; captures analyst-selected
+    # vs formatter-rendered headline counts so callers (daily_job) can log
+    # any mismatch without re-walking the pipeline.
+    render_stats: dict = field(default_factory=dict)
 
 
 # ─── Legacy compatibility shim ───────────────────────────────────────────────

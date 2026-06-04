@@ -326,10 +326,10 @@ if __name__ == "__main__":
     print(f"Topics: {len(result.trending_topics)}")
     print()
     for c in result.trending_topics:
-        sent_cn = SENTIMENT_LABELS_CN.get(c.sentiment.label, "中性")
+        sent = SENTIMENT_LABELS_CN.get(c.sentiment.label, "neutral")
         title = c.headline or c.rule_label
-        print(f"【{title}】 {c.post_count} 条讨论 | 情绪{sent_cn}")
-        print(f"  争论点：{c.discussion_focus}")
-        print(f"  理由：{c.reasons}")
-        print(f"  策略含义：{c.market_relevance}")
+        print(f"[{title}] {c.post_count} posts | sentiment {sent}")
+        print(f"  Debate: {c.discussion_focus}")
+        print(f"  Rationale: {c.reasons}")
+        print(f"  Market read: {c.market_relevance}")
         print()

@@ -9,7 +9,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 ALPHA_VANTAGE_URL = "https://www.alphavantage.co/query"
-DEFAULT_TOPICS = "economy_macro,financial_markets,earnings,technology"
+DEFAULT_TOPICS = "economy_macro,financial_markets,finance,real_estate,manufacturing"
 
 
 def _get_api_key() -> str:
@@ -24,13 +24,22 @@ def _normalize_alpha_item(item: dict[str, Any]) -> dict[str, Any] | None:
     if not title:
         return None
 
-    summary = (item.get("summary") or "").strip() or "暂无摘要"
+    summary = (item.get("summary") or "").strip() or "no summary available"
     source = (item.get("source") or "Alpha Vantage").strip()
     url = item.get("url")
     published_at = item.get("time_published")
 
-    # topics 是列表，先粗略映射成 category
-    category = "general"
+    # Alpha Vantage provides overall_sentiment_label — pass it through so
+    # risk_monitor can skip the LLM call for AV articles.
+    av_sentiment = (item.get("overall_sentiment_label") or "").strip().upper()
+    # Normalize to NEGATIVE / POSITIVE / NEUTRAL
+    if av_sentiment in ("Bearish", "Somewhat-Bearish"):
+        av_sentiment = "NEGATIVE"
+    elif av_sentiment in ("Bullish", "Somewhat-Bullish"):
+        av_sentiment = "POSITIVE"
+    else:
+        av_sentiment = "NEUTRAL"
+
     topics = item.get("topics") or []
     topic_names = []
     if isinstance(topics, list):
@@ -42,11 +51,11 @@ def _normalize_alpha_item(item: dict[str, Any]) -> dict[str, Any] | None:
 
     joined_topics = " ".join(topic_names)
 
-    if any(k in joined_topics for k in ["economy", "macro", "financial_markets"]):
+    if any(k in joined_topics for k in ["economy", "macro", "financial_markets", "finance", "real_estate"]):
         category = "macro"
-    elif any(k in joined_topics for k in ["earnings"]):
+    elif "earnings" in joined_topics:
         category = "equity"
-    elif any(k in joined_topics for k in ["technology"]):
+    else:
         category = "general"
 
     return {
@@ -56,6 +65,7 @@ def _normalize_alpha_item(item: dict[str, Any]) -> dict[str, Any] | None:
         "category": category,
         "url": url,
         "published_at": str(published_at) if published_at is not None else None,
+        "av_sentiment": av_sentiment,
     }
 
 

@@ -84,5 +84,5 @@ def _split_message(text: str, max_len: int = 4000) -> list[str]:
 
 
 if __name__ == "__main__":
-    result = send_to_telegram("测试：Telegram 发送成功。")
+    result = send_to_telegram("Test: Telegram send succeeded.")
     print(result)
