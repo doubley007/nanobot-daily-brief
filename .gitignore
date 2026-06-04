@@ -21,3 +21,25 @@ nanobot/
 .idea/
 .vscode/
 *.swp
+
+# Runtime state — risk monitor seen-set, alert cache, etc.
+data/
+
+# Generated reports — eval, source-status, etc.
+reports/
+
+# Personal portfolio fixture
+holdings.json
+
+# Internal / personal docs not for the public-ish repo
+dev-notes/
+CONVERSATION_LOG_*.md
+GE_*.md
+
+# Local launcher scripts (machine-specific paths, not portable)
+start.sh
+run_telegram_bot.sh
+run_risk_monitor.sh
+
+# One-off PPT generator (relies on internal slide content)
+generate_ppt.py
